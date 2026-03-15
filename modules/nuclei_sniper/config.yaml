@@ -1,0 +1,110 @@
+# ============================================================================
+# Nuclei Sniper Module Configuration
+# ============================================================================
+
+feeds:
+  # RSS feed URLs to monitor for new CVEs
+  sources:
+    - name: "github_advisories"
+      url: "https://github.com/advisories.atom"
+      enabled: true
+    - name: "nitter_cve_search"
+      url: "https://nitter.net/search/rss?q=cve+poc"
+      enabled: true
+    - name: "packetstorm"
+      url: "https://rss.packetstormsecurity.com/files/tags/exploit/"
+      enabled: true
+    - name: "cve_details"
+      url: "https://www.cvedetails.com/vulnerability-feed.php?vendor_id=0&product_id=0&version_id=0&orderby=1&cvssscoremin=7"
+      enabled: false
+
+  # How often to poll feeds (seconds)
+  poll_interval: 3600
+
+  # Maximum entries to process per feed per poll cycle (memory guard)
+  max_entries_per_feed: 50
+
+  # Request timeout for feed fetching (seconds)
+  fetch_timeout: 30
+
+  # Rate limit between feed fetches (seconds)
+  fetch_delay: 2
+
+ai:
+  # Max retries for AI template generation
+  generation_retries: 3
+
+  # Temperature for AI generation (0.0 = deterministic, 1.0 = creative)
+  generation_temperature: 0.7
+
+  # Maximum prompt length in characters
+  max_prompt_length: 4000
+
+  # Complexity level for AI Router
+  complexity: "COMPLEX"
+
+  # Rate limit: max AI calls per minute
+  max_calls_per_minute: 10
+
+  # Backoff multiplier for retries (seconds)
+  retry_backoff_base: 2
+
+validation:
+  # Path to nuclei binary
+  nuclei_path: "/usr/local/bin/nuclei"
+
+  # Max validation retries (with AI correction feedback)
+  max_retries: 3
+
+  # Timeout for nuclei validation subprocess (seconds)
+  validation_timeout: 60
+
+  # Directory for temporary template files
+  temp_dir: "/tmp/nuclei_sniper_templates"
+
+execution:
+  # Default targets to scan (can be overridden per CVE)
+  default_targets:
+    - "http://localhost:42000"   # Add your target(s) here
+
+  # Queue to push validated templates for execution
+  push_to_queue: "queue:recon"
+
+  # Results queue
+  results_queue: "results:incoming"
+
+  # Scan timeout per target (seconds)
+  scan_timeout: 300
+
+redis:
+  # Queue this module consumes from
+  task_queue: "queue:nuclei_sniper"
+
+  # Redis set key for tracking seen CVE IDs
+  seen_cves_key: "nuclei_sniper:seen_cves"
+
+  # Prefix for per-CVE status tracking
+  status_prefix: "nuclei_sniper:status:"
+
+  # Key for storing templates pending manual review
+  manual_review_key: "nuclei_sniper:manual_review"
+
+  # Key for in-memory buffer when Redis is down
+  buffer_max_size: 100
+
+  # Connection retry settings
+  connection_retry_max: 5
+  connection_retry_delay: 5
+
+  # Distributed lock TTL for feed polling (seconds)
+  poll_lock_ttl: 300
+
+logging:
+  # Module-specific log level
+  level: "INFO"
+
+  # Whether to log full AI prompts/responses (may contain sensitive data)
+  log_ai_payloads: false
+
+  # Whether to log full template YAML
+  log_templates: true

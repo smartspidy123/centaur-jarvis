@@ -1,0 +1,221 @@
+
+---
+
+## Deep Dive Post-Mortem (DNA)
+
+### ASCII Diagram: Complete CLI Flow
+User Input
+│
+▼
+┌─────────────────┐
+│ main.py │
+│ ┌───────────┐ │
+│ │ argparse │──┼──→ --list-profiles → print & exit
+│ │ │ │ --list-scans → print & exit
+│ │ │ │ --target URL → ↓
+│ │ │ │ --resume ID → ↓
+│ └─────┬─────┘ │
+│ │ │
+│ ┌─────▼─────┐ │
+│ │load_config│ │ config.yaml → profiles, display, redis, state
+│ └─────┬─────┘ │
+│ │ │
+│ ┌─────▼─────┐ │
+│ │ signal │ │ SIGINT/SIGTERM → signal_handler()
+│ │ handler │ │ → save state → stop processes → exit
+│ └─────┬─────┘ │
+│ │ │
+│ ┌─────▼─────────────────────────────────────────────┐
+│ │ run_scan() │
+│ │ │
+│ │ 1. Resolve profile (fallback if invalid) │
+│ │ 2. Init StateManager │
+│ │ 3. Init ProcessManager │
+│ │ └─ check_duplicate_instance() │
+│ │ 4. Init ScanController │
+│ │ ├─ NEW: initialize_scan(target) │
+│ │ │ ├─ parse_targets() → validate URLs │
+│ │ │ ├─ connect_redis() → retry up to 3x │
+│ │ │ └─ start_result_listener() → bg thread │
+│ │ └─ RESUME: restore_from_state(saved) │
+│ │ ├─ load completed tasks │
+│ │ ├─ connect_redis() │
+│ │ └─ start_result_listener() │
+│ │ 5. Start services (non-manual) │
+│ │ └─ ProcessManager.start_services() │
+│ │ ├─ orchestrator (subprocess) │
+│ │ ├─ recon_worker (subprocess) │
+│ │ ├─ fuzzer_worker (subprocess) │
+│ │ └─ monitor thread (health check) │
+│ │ 6. Start auto-save thread │
+│ │ 7. Create LiveDisplay │
+│ │ 8. Start scan thread (background) │
+│ │ └─ controller.run_scan() │
+│ │ ├─ Phase: RECON │
+│ │ │ ├─ push tasks → Redis recon queue │
+│ │ │ ├─ add activities │
+│ │ │ └─ wait_for_phase_completion() │
+│ │ ├─ Phase: FUZZING │
+│ │ │ ├─ get discovered endpoints │
+│ │ │ ├─ push fuzz tasks → Redis fuzzer Q │
+│ │ │ └─ wait_for_phase_completion() │
+│ │ ├─ Phase: SNIPER │
+│ │ │ ├─ get findings from recon/fuzz │
+│ │ │ ├─ push sniper tasks → Redis sniper Q │
+│ │ │ └─ wait_for_phase_completion() │
+│ │ └─ Phase: REPORTING │
+│ │ ├─ generate_report() → Redis │
+│ │ └─ fallback: save JSON to disk │
+│ │ 9. Start live display (blocks main thread) │
+│ │ └─ rich.Live loop every 2s │
+│ │ ├─ render banner │
+│ │ ├─ render scan info │
+│ │ ├─ render activities │
+│ │ ├─ render events │
+│ │ ├─ render stats + summaries │
+│ │ ├─ render errors │
+│ │ └─ render queue status │
+│ │ 10. On shutdown: │
+│ │ ├─ print_summary() │
+│ │ ├─ stop auto-save │
+│ │ ├─ stop processes (SIGTERM→wait→SIGKILL) │
+│ │ └─ clean PID files │
+│ └────────────────────────────────────────────────────┘
+└─────────────────┘
+
+Result Listener Thread (background):
+┌──────────────────────────────────────────┐
+│ BLPOP jarvis:results (timeout=2) │
+│ │ │
+│ ├─ _process_result() │
+│ │ ├─ remove from activities │
+│ │ ├─ move to completed_tasks │
+│ │ ├─ update stats │
+│ │ ├─ process findings → events │
+│ │ ├─ update tool_summaries │
+│ │ └─ add completion/error event │
+│ │ │
+│ └─ loop until stop_event is set │
+└──────────────────────────────────────────┘
+
+text
+
+
+### Activity Tracking & Event Feed Explanation
+
+The system uses three **thread-safe bounded deques** (via `ThreadSafeDeque`) to track:
+
+1. **Activities** (`max_activities=8`): Currently running tasks. When a task is pushed to a Redis queue, an activity entry is added with `task_id`, `tool`, `description`, and `started_at`. When the result comes back via the result listener, the activity is removed by `task_id`.
+
+2. **Events** (`max_events=50`): Important discoveries and status changes. Events are color-coded by type:
+   - `info` (cyan): General information like tech detection
+   - `success` (green): Task completions, endpoint discoveries
+   - `discovery` (green): New endpoints found
+   - `warning` (yellow): Medium severity findings, timeouts
+   - `critical` (red): High/critical severity vulnerabilities
+   - `phase` (magenta): Phase transitions
+   - `error` (red): Failures
+
+3. **Errors** (`max_errors=20`): Dedicated error tracking for the error panel. Errors include tool crashes, Redis issues, network failures.
+
+All deques are bounded with `maxlen` to prevent memory issues with long-running scans. Older entries scroll away naturally.
+
+### Edge Case Mitigation Table
+
+| # | Edge Case | Code Reference | Mitigation |
+|---|-----------|---------------|------------|
+| 1 | Redis not running | `scan_controller.py:_connect_redis()` | 3 retries with backoff; red error with suggestion for --manual |
+| 2 | Worker crashes during scan | `process_manager.py:_check_processes()` | Auto-restart up to max_restarts; error in dashboard |
+| 3 | Network partition on task push | `scan_controller.py:_push_task()` | Retry with configurable backoff; error event on final failure |
+| 4 | Target unreachable | `scan_controller.py:_process_result()` | Error event; continue with other targets; mark in report |
+| 5 | AI provider fails | `scan_controller.py:_process_result()` | Error event; deterministic scan continues without AI |
+| 6 | RAG search timeout | `scan_controller.py:_process_result()` | Warning event; proceed without context |
+| 7 | Ctrl+C during live display | `main.py:signal_handler()` | Save state; print resume command; clean shutdown |
+| 8 | Resume with completed tasks | `scan_controller.py:restore_from_state()` | Skip completed tasks via `_completed_tasks` dict |
+| 9 | Large findings set | `live_display.py:_build_events()` | Bounded deque with maxlen; show last 15 in panel |
+| 10 | Multiple CLI instances | `process_manager.py:check_duplicate_instance()` | PID file with liveness check; error + exit |
+| 11 | Disk full during state save | `state_manager.py:save_state()` | Fallback to /tmp; error in terminal |
+| 12 | Report generation fails | `scan_controller.py:_generate_report()` | Fallback to JSON dump; error event |
+| 13 | Target file not found | `scan_controller.py:parse_targets()` | Error message + empty target list → init fails |
+| 14 | Invalid scan profile | `main.py:run_scan()` | Fallback to 'quick'; warning in terminal |
+| 15 | Stuck tasks on pause | `state_manager.py` + orchestrator dedup | State saves pending tasks; timeout/dedup on resume |
+| 16 | Child processes hang | `process_manager.py:stop_all()` | SIGTERM → wait(10s) → SIGKILL; error log |
+| 17 | Terminal resize | Built-in Rich handling | Automatic re-render |
+| 18 | No permissions for services | `process_manager.py:_start_process()` | PermissionError caught; suggest --manual |
+
+### Remaining Loopholes & Future Improvements
+
+1. **Web UI Dashboard**: Current terminal-only display limits accessibility. A web-based dashboard (FastAPI + WebSocket) would allow remote monitoring.
+
+2. **Notification Integration**: The config has a placeholder for webhooks. Implementing Slack/Discord/email notifications for critical findings would enhance usability.
+
+3. **Multi-scan Management**: Currently one scan per CLI instance. Future: support multiple concurrent scans with separate dashboards.
+
+4. **Plugin System for Profiles**: Allow users to define custom profiles via external YAML files, not just in config.yaml.
+
+5. **Progress Bars per Task**: The activity panel shows elapsed time but not actual progress percentage (would need tool-specific progress reporting).
+
+6. **Distributed Mode**: Current architecture is single-machine. Adding support for distributed workers across multiple machines would require a message broker upgrade.
+
+7. **Rate Limiting Dashboard**: No visibility into request rates or throttling. Adding a rate-limit panel would help with stealth scans.
+
+8. **Historical Scan Comparison**: No diff between scans. Future: compare findings across scans to detect new/resolved issues.
+
+9. **Authentication for Redis**: Password support is implemented but not tested with Redis ACL (Redis 6+).
+
+10. **Windows Compatibility**: `fcntl` (file locking) and `os.killpg` are Unix-specific. Would need `msvcrt` and process group alternatives for Windows.
+
+### Performance Considerations
+
+1. **Dashboard Refresh Rate** (default 2s): Lower values (e.g., 0.5s) make the display more responsive but increase CPU usage. The `rich.Live` component is efficient, but rendering complex layouts at high frequency on slow terminals can cause flickering.
+
+2. **Redis Polling**: The result listener uses `BLPOP` with a 2-second timeout, which is Redis-efficient (no busy polling). Queue length checks (`LLEN`) are O(1) operations.
+
+3. **Thread Safety**: All shared data structures use `threading.Lock` or `ThreadSafeDeque`. The bounded deques prevent unbounded memory growth.
+
+4. **State File I/O**: Auto-save every 30 seconds with atomic writes (write to temp + rename). File locking prevents corruption from concurrent saves.
+
+5. **Process Monitoring**: Health check loop runs every 5 seconds — low overhead.
+
+6. **Memory**: Bounded deques (50 events, 20 errors, 8 activities) keep memory constant. Completed tasks dictionary grows with scan size but is bounded by practical task counts.
+
+### Integration Notes
+
+1. **Redis Queue Names**: Match existing module conventions:
+   - `jarvis:queue:recon` → recon workers
+   - `jarvis:queue:fuzzer` → fuzzer workers
+   - `jarvis:queue:sniper` → sniper workers
+   - `jarvis:results` → result collection
+
+2. **Task Payload Format**: Each task pushed to Redis includes:
+   ```json
+   {
+     "task_id": "SCAN_xxx_tool_yyy",
+     "scan_id": "SCAN_xxx",
+     "phase": "recon|fuzzing|sniper",
+     "tool": "nuclei|subfinder|...",
+     "target": "https://...",
+     "status": "PENDING",
+     "created_at": "2024-01-01T00:00:00Z"
+   }
+Result Format: Workers post results to jarvis:results:
+
+JSON
+
+{
+  "task_id": "SCAN_xxx_tool_yyy",
+  "status": "COMPLETED|FAILED",
+  "tool": "nuclei",
+  "data": {
+    "findings": [...],
+    "endpoints": [...],
+    "technologies": [...],
+    "ports": [...],
+    "summary": "..."
+  }
+}
+Status Strings: All uppercase (PENDING, RUNNING, COMPLETED, FAILED, PAUSED) matching shared.schemas.TaskStatus.
+
+Config File Location: cli/config.yaml relative to the CLI module directory. Auto-detected via Path(__file__).parent / "config.yaml".
+
+AI Router Integration: The scan controller does not directly call the AI router — that's handled by individual worker modules. The controller tracks AI usage via data.ai_used in results.

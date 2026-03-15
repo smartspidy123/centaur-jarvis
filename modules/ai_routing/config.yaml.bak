@@ -1,0 +1,63 @@
+# =============================================================================
+# AI Router Configuration — Default Settings
+# Override via config/modules.yaml under key "ai_routing"
+# =============================================================================
+
+local_llm:
+  enabled: true
+  ollama_base_url: "http://localhost:11434"
+  preferred_model: "llama3:8b"          # Used if multiple models; skip CLI prompt
+  fallback_to_external: true
+  health_check_timeout_seconds: 5
+  request_timeout_seconds: 120          # Local models can be slow
+  interactive_model_selection: false     # If true, prompt user via CLI on startup
+
+external_apis:
+  priority: ["gemini", "deepseek", "groq"]
+
+  gemini:
+    api_key_env: "GEMINI_API_KEY"
+    base_url: "https://generativelanguage.googleapis.com/v1beta"
+    model: "gemini-1.5-pro-latest"
+    rate_limit_rpm: 60                  # Requests per minute (free tier)
+    max_context_tokens: 2000000
+    request_timeout_seconds: 60
+    max_output_tokens: 8192
+
+  deepseek:
+    api_key_env: "DEEPSEEK_API_KEY"
+    base_url: "https://api.deepseek.com/v1"
+    model: "deepseek-chat"
+    rate_limit_rpm: 1000
+    max_context_tokens: 128000
+    request_timeout_seconds: 60
+    max_output_tokens: 4096
+
+  groq:
+    api_key_env: "GROQ_API_KEY"
+    base_url: "https://api.groq.com/openai/v1"
+    model: "llama3-70b-8192"
+    rate_limit_rpm: 30                  # Free tier
+    max_context_tokens: 8192
+    request_timeout_seconds: 30
+    max_output_tokens: 4096
+
+routing:
+  context_thresholds:
+    huge: 100000                        # >100k tokens → force Gemini
+    large: 32000                        # >32k → external only
+    medium: 8000                        # >8k → external preferred
+    small: 8000                         # ≤8k → local possible
+
+  retry:
+    max_attempts: 3
+    base_delay_seconds: 1.0
+    max_delay_seconds: 30.0
+    exponential_base: 2
+
+  fallback_enabled: true                # If primary fails, try next in priority
+
+telemetry:
+  log_routing_decisions: true
+  log_api_latency: true
+  log_token_usage: true

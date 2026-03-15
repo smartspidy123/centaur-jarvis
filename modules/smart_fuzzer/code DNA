@@ -1,0 +1,290 @@
+Deep Dive Post-Mortem (DNA)
+ASCII Diagram — Complete Fuzzing Flow
+text
+
+ ┌──────────────────────────────────────────────────────────────────────┐
+ │                        CENTAUR-JARVIS FUZZING PIPELINE               │
+ │                                                                      │
+ │  ORCHESTRATOR                    SMART FUZZER MODULE                  │
+ │  ┌──────────┐                                                        │
+ │  │ Task     │──RPUSH──►┌──────────────────┐                          │
+ │  │ Scheduler│          │queue:smart_fuzzer │                          │
+ │  └──────────┘          └────────┬─────────┘                          │
+ │                                 │ BLPOP                              │
+ │                                 ▼                                    │
+ │                        ┌────────────────────┐                        │
+ │                        │   TASK VALIDATOR    │                        │
+ │                        │  • task_id exists?  │                        │
+ │                        │  • valid URL?       │                        │
+ │                        │  • params dict?     │                        │
+ │                        │  • vuln_types list? │                        │
+ │                        └────────┬───────────┘                        │
+ │                                 │ valid                              │
+ │                                 ▼                                    │
+ │                     ┌───────────────────────┐                        │
+ │                     │  STATUS: "processing" │──SET──► Redis          │
+ │                     └───────────┬───────────┘                        │
+ │                                 │                                    │
+ │              ┌──────────────────┴──────────────────┐                 │
+ │              │  OUTER LOOP: for param in params    │                 │
+ │              │    INNER LOOP: for vtype in vtypes  │                 │
+ │              └──────────────────┬──────────────────┘                 │
+ │                                 │                                    │
+ │                                 ▼                                    │
+ │                  ┌─────────────────────────────┐                     │
+ │                  │   PAYLOAD GENERATOR          │                    │
+ │                  │                              │                    │
+ │                  │  ┌────────────────────────┐  │                    │
+ │                  │  │ Build prompt:          │  │                    │
+ │                  │  │ param + type + vtype   │  │                    │
+ │                  │  │ + target context       │  │                    │
+ │                  │  └──────────┬─────────────┘  │                    │
+ │                  │             │                 │                    │
+ │                  │             ▼                 │                    │
+ │                  │  ┌────────────────────────┐  │  ┌──────────────┐ │
+ │                  │  │    AI ROUTER           │──┼─►│ LLM Backend  │ │
+ │                  │  │ TaskComplexity.MEDIUM   │  │  │ (GPT/Claude/ │ │
+ │                  │  │ temperature=0.7        │◄─┼──│  Ollama/etc) │ │
+ │                  │  └──────────┬─────────────┘  │  └──────────────┘ │
+ │                  │             │                 │                    │
+ │                  │     ┌───────┴───────┐        │                    │
+ │                  │     │  Parse JSON   │        │                    │
+ │                  │     │  array of     │        │                    │
+ │                  │     │  payloads     │        │                    │
+ │                  │     └───────┬───────┘        │                    │
+ │                  │             │                 │                    │
+ │                  │      ┌──────┴──────┐         │                    │
+ │                  │      │ FAIL?       │         │                    │
+ │                  │      │ Retry ≤ 2x  │         │                    │
+ │                  │      │ Then static │         │                    │
+ │                  │      │ fallback    │         │                    │
+ │                  │      └──────┬──────┘         │                    │
+ │                  │             │                 │                    │
+ │                  │      ┌──────┴──────┐         │                    │
+ │                  │      │ DEDUP       │         │                    │
+ │                  │      └──────┬──────┘         │                    │
+ │                  └─────────────┼────────────────┘                    │
+ │                                │ payloads[0..N]                      │
+ │                                ▼                                     │
+ │              ┌─────────────────────────────────────┐                 │
+ │              │   PAYLOAD LOOP: for p in payloads   │                 │
+ │              │                                     │                 │
+ │              │   iteration = 0                     │                 │
+ │              │   ┌─────────────────────────────┐   │                 │
+ │              │   │  INJECT payload into param  │   │                 │
+ │              │   │  params["q"] = payload      │   │                 │
+ │              │   └────────────┬────────────────┘   │                 │
+ │              │                │                     │                 │
+ │              │                ▼                     │                 │
+ │              │   ┌─────────────────────────────┐   │                 │
+ │              │   │      EXECUTOR               │   │                 │
+ │              │   │  ┌───────────────────────┐  │   │                 │
+ │              │   │  │ Token Bucket acquire  │  │   │ ◄── per host  │
+ │              │   │  │ (rate limit)          │  │   │                 │
+ │              │   │  └───────────┬───────────┘  │   │                 │
+ │              │   │             │               │   │                 │
+ │              │   │  ┌──────────┴────────────┐  │   │                 │
+ │              │   │  │ Exponential backoff?  │  │   │                 │
+ │              │   │  │ (if prev 429s)        │  │   │                 │
+ │              │   │  └──────────┬────────────┘  │   │                 │
+ │              │   │             │               │   │                 │
+ │              │   │  ┌──────────┴────────────┐  │   │                 │
+ │              │   │  │  HttpClient.request() │  │   │                 │
+ │              │   │  │  (GET/POST/etc.)      │  │   │                 │
+ │              │   │  └──────────┬────────────┘  │   │                 │
+ │              │   └─────────────┼───────────────┘   │                 │
+ │              │                 │ FuzzResponse       │                 │
+ │              │                 ▼                    │                 │
+ │              │   ┌─────────────────────────────┐   │                 │
+ │              │   │     RESPONSE ANALYZER       │   │                 │
+ │              │   │                             │   │                 │
+ │              │   │  ┌──── Timeout? ──► SKIP ──────► next payload    │
+ │              │   │  │                          │   │                 │
+ │              │   │  ├── ConnErr? ──► SKIP ────────► next payload    │
+ │              │   │  │                          │   │                 │
+ │              │   │  ├── WAF Block? ──► MUTATE ─┐   │                │
+ │              │   │  │   (403/429)          │   │   │                 │
+ │              │   │  │                      │   │   │                 │
+ │              │   │  ├── Suspicious? ──► FINDING    │                │
+ │              │   │  │   (reflection,       │   │   │                 │
+ │              │   │  │    SQL errors, etc.)  │   │   │                 │
+ │              │   │  │                      │   │   │                 │
+ │              │   │  └── Clean ──► SKIP ───────────► next payload    │
+ │              │   └─────────────────────────────┘   │                 │
+ │              │                                     │                 │
+ │              │   ┌─────────────────────────────┐   │                 │
+ │              │   │  MUTATION (if WAF block)    │   │                 │
+ │              │   │                             │   │                 │
+ │              │   │  iter < max_iterations?     │   │                 │
+ │              │   │  YES:                       │   │                 │
+ │              │   │    • Respect Retry-After    │   │                 │
+ │              │   │    • Call AI with:          │   │                 │
+ │              │   │      - original payload     │   │                 │
+ │              │   │      - response snippet     │   │                 │
+ │              │   │      - vuln type            │   │                 │
+ │              │   │      - temp=0.9 (creative)  │   │                 │
+ │              │   │    • Got mutated payload?   │   │                 │
+ │              │   │      YES → loop back to     │   │                 │
+ │              │   │           EXECUTOR          │   │                 │
+ │              │   │      NO  → abandon payload  │   │                 │
+ │              │   │  NO:                        │   │                 │
+ │              │   │    • Log "max reached"      │   │                 │
+ │              │   │    • abandon payload        │   │                 │
+ │              │   └─────────────────────────────┘   │                 │
+ │              └─────────────────────────────────────┘                 │
+ │                                │                                     │
+ │                                │ findings[]                          │
+ │                                ▼                                     │
+ │                  ┌─────────────────────────────┐                     │
+ │                  │   AI VERIFICATION           │                     │
+ │                  │   (if verify_with_ai=true)  │                     │
+ │                  │                             │                     │
+ │                  │  For each finding:          │                     │
+ │                  │   • Build verification      │                     │
+ │                  │     prompt (payload +       │                     │
+ │                  │     response snippet)       │                     │
+ │                  │   • Call AI (temp=0.3)      │                     │
+ │                  │   • Parse JSON verdict      │                     │
+ │                  │   • MAX 1 attempt (!)       │                     │
+ │                  │                             │                     │
+ │                  │   confirmed → verified=True │                     │
+ │                  │   rejected  → conf × 0.3   │                     │
+ │                  │   AI fail   → keep as-is   │                     │
+ │                  └────────────┬────────────────┘                     │
+ │                               │                                      │
+ │                               ▼                                      │
+ │                  ┌─────────────────────────────┐                     │
+ │                  │  BUILD TASK RESULT          │                     │
+ │                  │  {task_id, findings, stats, │                     │
+ │                  │   errors, timestamps}       │                     │
+ │                  └────────────┬────────────────┘                     │
+ │                               │                                      │
+ │                               ▼                                      │
+ │                  ┌─────────────────────────────┐                     │
+ │                  │  PUSH to results:incoming   │──RPUSH──► Redis     │
+ │                  │  (or memory buffer if       │                     │
+ │                  │   Redis is down)            │                     │
+ │                  └─────────────────────────────┘                     │
+ │                                                                      │
+ │                  ┌─────────────────────────────┐                     │
+ │                  │  STATUS: "completed"        │──SET──► Redis       │
+ │                  └─────────────────────────────┘                     │
+ └──────────────────────────────────────────────────────────────────────┘
+AI Interaction and Mutation Logic (Detailed)
+Phase 1 — Initial Generation:
+The PayloadGenerator constructs a structured prompt embedding the parameter name, its type hint (e.g., "integer", "string"), the target vulnerability class, and target context (URL, method). This prompt is sent to the AI Router at TaskComplexity.MEDIUM with temperature=0.7. The AI is expected to return a JSON array of 3–5 diverse payloads. The parser first attempts strict JSON extraction (regex for [...]), then falls back to line-by-line extraction if JSON parsing fails. Two retries are allowed for malformed responses before reverting to the static fallback list in config.yaml.
+
+Phase 2 — Mutation on WAF Block:
+When the executor receives a 403 or 429, the response body is truncated to 2000 characters and sent to the AI along with the blocked payload. The mutation prompt asks for a single obfuscated/encoded bypass using techniques like double URL encoding, case variation, comment injection, polyglots, etc. A higher temperature (0.9) encourages creative variations. If the AI returns the same payload or None, the current payload is abandoned. The mutation loop respects max_iterations and any Retry-After headers.
+
+Phase 3 — Verification:
+Each potential finding is verified exactly once (hard cap prevents infinite loops). The verification prompt sends the payload + response snippet to AI at temperature=0.3 (analytical, deterministic). The AI returns {is_vulnerable, confidence, evidence}. Confirmed findings are promoted; rejected findings have their confidence score multiplied by 0.3 (not deleted—useful for manual review).
+
+Edge Cases Mitigated (Summary Table)
+#	Edge Case	Implementation
+1	AI Router unavailable	try/except around import + each call; NoAIAvailableError caught; static fallback payloads from config
+2	Rate limit 429	Retry-After header respected; exponential backoff counter per host in executor; token bucket rate limiter
+3	WAF block 403	Mutation loop up to max_iterations; response snippet passed to AI for contextual bypass
+4	Invalid AI format	Up to 2 retries with JSON + line-by-line parse strategies; then static fallback
+5	Timeout/connection error	FuzzResponse.is_timeout/is_connection_error flags; logged + skipped; no crash
+6	Missing type hints	Default to "string" with debug log; AI generates generic payloads
+7	Many parameters	Sequential processing; stats tracked; parallel future enhancement noted
+8	Duplicate payloads	_seen set in PayloadGenerator; dedup per generator instance
+9	Malformed response	_safe_text() with errors="replace" encoding; truncated to 2000 chars
+10	Verification loop	max_verification_attempts=1; exactly one AI call per finding
+11	Redis connection lost	Memory buffer (max 50 results); reconnect retry loop; buffer flush on reconnect
+12	Out-of-scope redirects	scope_check_redirects config; max_redirect_depth limit
+13	Blind/second-order vulns	Explicitly not handled in v1; documented for OAST integration
+14	JSON body injection	Method-based routing in _build_request_kwargs; auto-detects dict/list values for JSON
+Remaining Loopholes & Future Improvements
+OAST/Blind Detection: Currently no support for out-of-band callbacks. Integrate with Burp Collaborator, Interactsh, or custom callback server to detect blind SQLi, blind XSS, blind SSRF, blind CMDi.
+
+Time-based Detection: Response time delta analysis for blind SQL injection (SLEEP(5), WAITFOR DELAY) and blind command injection is not implemented. Future versions should measure baseline response times and detect statistical anomalies.
+
+DOM XSS: Current detection is reflection-based only. True DOM XSS requires browser-based execution (headless Chrome/Puppeteer) to detect payloads that execute via DOM manipulation.
+
+Parameter Prioritization: AI could rank parameters by likelihood of vulnerability (e.g., id params more likely for SQLi, search for XSS) to optimize testing order.
+
+Payload Caching: Successful WAF-bypass payloads could be cached per WAF type/target for reuse across scans, dramatically reducing AI calls.
+
+WAF Fingerprinting: Before fuzzing, send known WAF-detection requests to identify the specific WAF (Cloudflare, Akamai, ModSecurity, etc.) and select pre-built bypass strategies.
+
+Concurrent Parameter Testing: Current sequential processing is safe but slow. Thread pool or asyncio-based parallel fuzzing with shared rate limiters would improve throughput.
+
+Token Budget Management: Track cumulative AI token usage per scan and enforce budgets to prevent cost overruns.
+
+Confidence Scoring Model: Replace simple threshold with ML-based confidence scoring that considers response characteristics, payload type, and historical true/false positive rates.
+
+Protocol Support: Extend beyond HTTP to WebSocket, GraphQL, gRPC fuzzing.
+
+Performance Considerations
+Memory: The in-memory dedup set grows linearly with unique payloads per task (typically <1000). Memory buffer for Redis failover is capped at 50 results. Response bodies are truncated to 2000 chars before storing.
+
+AI API Rate Limits: Each parameter × vuln_type generates 1 AI call for initial payloads. Each WAF-blocked payload can generate up to max_iterations mutation calls. Each finding generates 1 verification call. For a task with 5 params × 3 vuln types, worst case: 15 initial + 15×3 mutations + 15 verifications = 75 AI calls. Budget accordingly.
+
+Target Rate Limiting: Token bucket ensures default_rate (5 RPS) per host. Exponential backoff on 429s prevents target overload. Retry-After headers are respected.
+
+Redis Throughput: BLPOP is O(1). RPUSH for results is O(1). Status SET with TTL is O(1). No Redis bottleneck expected.
+
+Integration Notes
+How the Orchestrator Sends Tasks:
+
+Python
+
+import redis
+import json
+
+r = redis.Redis()
+task = {
+    "task_id": "fuzz-001",
+    "type": "FUZZ",
+    "target": "http://target.com/api/search",
+    "method": "GET",
+    "params": {"q": "test", "page": "1"},
+    "param_type_hints": {"q": "string", "page": "integer"},
+    "vuln_types": ["xss", "sqli", "ssti"],
+    "max_iterations": 3,
+}
+r.rpush("queue:smart_fuzzer", json.dumps(task))
+Result Structure (in results:incoming):
+
+JSON
+
+{
+    "task_id": "fuzz-001",
+    "module": "smart_fuzzer",
+    "target": "http://target.com/api/search",
+    "status": "completed",
+    "findings": [
+        {
+            "parameter": "q",
+            "vuln_type": "xss",
+            "payload": "<svg/onload=alert(1)>",
+            "evidence": "Payload reflected verbatim in response | AI Verification: Confirmed.",
+            "confidence": 0.85,
+            "verified": true,
+            "status_code": 200,
+            "response_snippet": "...<svg/onload=alert(1)>...",
+            "iteration": 0
+        }
+    ],
+    "stats": {
+        "total_requests": 42,
+        "total_payloads_generated": 25,
+        "total_mutations": 3,
+        "total_waf_blocks": 5,
+        "total_timeouts": 1,
+        "total_errors": 0,
+        "ai_calls": 12,
+        "parameters_tested": 2,
+        "vuln_types_tested": 3
+    },
+    "errors": [],
+    "started_at": "2025-01-15T10:30:00.000000+00:00",
+    "completed_at": "2025-01-15T10:32:45.123456+00:00"
+}
+Status Keys in Redis:
+
+text
+
+task:status:fuzz-001  →  "completed"   (TTL: 3600s)

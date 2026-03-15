@@ -1,0 +1,57 @@
+# =============================================================================
+# Centaur-Jarvis Reporting Module Configuration
+# =============================================================================
+
+# Output directory for generated reports (relative to CWD or absolute)
+output_dir: "reports/"
+
+# Formats to generate by default
+formats:
+  - "html"
+  - "json"
+  - "text"
+
+# Directory containing Jinja2 HTML templates
+templates_dir: "modules/reporting/templates/"
+
+# Whether to include full raw stdout/stderr in reports
+include_raw_output: false
+
+# Severity ordering (highest to lowest)
+severity_order:
+  - "critical"
+  - "high"
+  - "medium"
+  - "low"
+  - "info"
+  - "unknown"
+
+# Redis configuration (can be overridden by env vars)
+redis:
+  host: "localhost"
+  port: 6379
+  db: 0
+  socket_timeout: 5
+  retry_on_timeout: true
+
+# HTML report settings
+html:
+  max_findings_per_page: 500
+  include_expandable_raw: true
+  title_prefix: "Centaur-Jarvis VAPT Report"
+
+# Text report settings
+text:
+  max_width: 120
+  separator_char: "="
+  finding_separator_char: "-"
+
+# JSON report settings
+json:
+  indent: 2
+  sort_keys: true
+
+# Telemetry
+telemetry:
+  log_timing: true
+  log_stats: true

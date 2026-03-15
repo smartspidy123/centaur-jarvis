@@ -1,0 +1,127 @@
+# ==============================================================================
+# Centaur-Jarvis CLI Configuration
+# ==============================================================================
+
+# --- Scan Profiles ---
+profiles:
+  quick:
+    phases:
+      - discovery
+      - enumeration
+  full:
+    phases:
+      - discovery
+      - enumeration
+      - fuzzing
+      - exploit
+
+phases:
+  discovery:
+    tasks:
+      - tool: subfinder
+        params: { recursive: true, threads: 10 }
+      - tool: httpx
+        params: { ports: "80,443,8080", status_code: true }
+      - tool: naabu
+        params: { ports: "top-1000", rate: 100 }
+  enumeration:
+    tasks:
+      - tool: nuclei
+        params: { severity: "critical,high,medium", tags: "" }
+      - tool: dirsearch
+        params: { extensions: "php,asp,js", wordlist: "/usr/share/wordlists/dirb/common.txt" }
+  fuzzing:
+    tasks:
+      - tool: smart_fuzzer
+        params: { vuln_types: ["xss","sqli"], max_iterations: 3 }
+  exploit:
+    tasks:
+      - tool: nuclei_sniper
+        params: { enabled: true, feeds: ["github","packetstorm"] }
+
+# --- Display Settings ---
+display: 
+  refresh_interval: 2          # Dashboard refresh rate in seconds
+  max_events: 50               # Maximum events shown in live feed
+  max_activities: 8            # Maximum concurrent activities shown
+  max_errors: 20               # Maximum errors shown in error panel
+  show_tool_summaries: true    # Show aggregated tool statistics
+  show_queue_status: true      # Show Redis queue lengths
+  error_panel: true            # Show dedicated error panel
+  verbose: false               # Verbose event output
+  hacker_theme: true           # Green/cyan/red color scheme
+  show_banner: true            # Show ASCII art banner on start
+  spinner_style: "dots"        # Rich spinner style
+
+# --- Redis Connection ---
+redis:
+  host: "127.0.0.1"
+  port: 6379
+  db: 0
+  password: null
+  socket_timeout: 5
+  retry_on_timeout: true
+  max_retries: 3
+  retry_delay: 2
+
+# --- Process Management ---
+processes:
+  orchestrator:
+    module: "modules.orchestrator.main"
+    required: true
+    restart_on_crash: true
+    max_restarts: 3
+  recon_worker:
+    module: "modules.recon.worker"
+    required: true
+    restart_on_crash: true
+    max_restarts: 3
+  fuzzer_worker:
+    module: "modules.fuzzer.worker"
+    required: false
+    restart_on_crash: true
+    max_restarts: 3
+  sniper_worker:
+    module: "modules.sniper.worker"
+    required: false
+    restart_on_crash: true
+    max_restarts: 3
+
+# --- Services ---
+services:
+  orchestrator:
+    command: "python core/orchestrator.py -c config/core.yaml"
+    heartbeat_key: "worker:heartbeat:orchestrator"
+    queue: "queue:orchestrator"
+  recon_worker:
+    command: "python -m modules.recon.worker"
+    heartbeat_key: "worker:heartbeat:recon_worker"
+    queue: "queue:recon"
+  fuzzer_worker:
+    command: "python -m modules.smart_fuzzer.fuzzer"
+    heartbeat_key: "worker:heartbeat:smart_fuzzer"
+    queue: "queue:smart_fuzzer"
+  sniper:
+    command: "python -m modules.nuclei_sniper.executor"
+    heartbeat_key: "worker:heartbeat:sniper"
+    queue: "queue:nuclei_sniper:execute"
+
+# --- State Management ---
+state:
+  save_directory: ".jarvis_state"
+  auto_save_interval: 30       # seconds between auto-saves
+  max_state_files: 20          # keep last N state files
+  fallback_directory: "/tmp/jarvis_state"
+
+# --- Notifications (Future) ---
+notifications:
+  enabled: false
+  webhook_url: null
+  notify_on: ["critical_finding", "scan_complete", "scan_error"]
+
+# --- Logging ---
+logging:
+  level: "INFO"
+  file: "logs/cli.log"
+  max_size_mb: 50
+  backup_count: 5

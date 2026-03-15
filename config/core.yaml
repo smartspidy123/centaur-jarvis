@@ -1,0 +1,32 @@
+redis:
+  host: localhost
+  port: 6379
+  db: 0
+  password: null
+  socket_timeout: 5
+  retry_on_timeout: true
+
+rate_limiting:
+  default_rate: 10          # requests per second
+  default_burst: 20
+  per_domain: {}            # override per domain: "example.com": {"rate": 5, "burst": 10}
+
+circuit_breaker:
+  failure_threshold: 5
+  recovery_timeout: 30       # seconds
+  half_open_max_calls: 2
+
+task_defaults:
+  task_timeout: 300          # seconds
+  max_retries: 3
+  result_ttl: 604800         # 7 days
+
+heartbeat:
+  interval: 30                # seconds (worker sends)
+  expiry: 60                  # seconds (key TTL)
+  stale_threshold: 90         # seconds (mark dead if older)
+
+webhooks:
+  discord: null               # optional Discord webhook URL
+
+shutdown_timeout: 10          # seconds to wait for threads to finish

@@ -1,0 +1,230 @@
+## 🔬 Deep Dive Post-Mortem (DNA)
+
+### 1. ASCII Diagram — Routing Decision Flow
+text
+
+                    ┌─────────────────────┐
+                    │   TaskRequest In     │
+                    │  (type, prompt,      │
+                    │   context, complexity)│
+                    └──────────┬──────────┘
+                               │
+                ┌──────────────▼──────────────┐
+                │  preferred_provider set?     │
+                └──┬───────────────────────┬──┘
+               YES │                       │ NO
+                   ▼                       ▼
+          ┌────────────────┐    ┌─────────────────────┐
+          │ Is preferred   │    │ context > 100,000?  │
+          │ available?     │    └──┬──────────────┬───┘
+          └──┬─────────┬──┘      YES              NO
+            YES        NO         │                │
+             │          │         ▼                ▼
+             ▼          │  ┌──────────────┐  ┌──────────────────┐
+        Use preferred   │  │ Gemini       │  │ complexity ==    │
+                        │  │ available?   │  │ SIMPLE and       │
+                        │  └─┬──────────┬┘  │ local available  │
+                        │   YES         NO   │ and ctx ≤ 8k?   │
+                        │    │           │   └─┬────────────┬──┘
+                        ▼    ▼           ▼    YES           NO
+                ┌──────────────┐  ┌────────┐  │            │
+                │ Fall through │  │ Use    │  ▼            ▼
+                │ to auto      │  │ Gemini │ Use        ┌───────────┐
+                │ routing      │  └────────┘ Local      │ctx > 32k? │
+                └──────────────┘                        └─┬───────┬─┘
+                                                         YES      NO
+                                                          │       │
+                                                          ▼       ▼
+                                                  ┌──────────┐ ┌──────────┐
+                                                  │ External │ │ctx > 8k? │
+                                                  │ by       │ └─┬──────┬─┘
+                                                  │ priority │  YES     NO
+                                                  │ (filter  │   │      │
+                                                  │ by ctx   │   ▼      ▼
+                                                  │ capacity)│ Ext    ┌─────┐
+                                                  └──────────┘ pref.  │Local│
+                                                               local  │avail│
+                                                               fall-  │  ?  │
+                                                               back   └┬──┬─┘
+                                                                      YES NO
+                                                                       │   │
+                                                                       ▼   ▼
+                                                                    Local  Ext
+                                                                           by
+                                                                          prio
+
+               ┌──────────────────────────────────────────┐
+               │  IF CHOSEN PROVIDER FAILS:               │
+               │                                          │
+               │  1. Retry up to 3x (exponential backoff) │
+               │  2. If still failing → next in chain     │
+               │  3. Chain: [primary, ...priority, local] │
+               │  4. All fail → NoAIAvailableError        │
+               └──────────────────────────────────────────┘
+text
+
+
+### 2. Local/Remote Detection Explanation
+
+**Local LLM Detection (Ollama):**
+Startup → GET http://localhost:11434/
+├─ Connection refused → Mark UNAVAILABLE (Ollama not installed/running)
+├─ Timeout (>5s) → Mark UNAVAILABLE (Ollama unresponsive)
+└─ HTTP 200 → Ollama is running
+│
+▼
+GET /api/tags → Parse model list
+├─ Empty list → Mark UNAVAILABLE (no models pulled)
+├─ Single model → Auto-select
+├─ Multiple + preferred_model matches → Use preferred
+├─ Multiple + interactive_selection → CLI prompt
+│ ├─ Valid input → Use selected
+│ ├─ Invalid/empty → Use first model
+│ └─ KeyboardInterrupt/EOFError → Use first model
+└─ Multiple + no match → Use first model + log warning
+
+text
+
+
+**Remote API Detection:**
+For each provider in priority order:
+1. Check env var (e.g., GEMINI_API_KEY) exists
+├─ Missing → Log ERROR, mark UNAVAILABLE
+└─ Present → Initialize rate limiter, mark AVAILABLE
+
+Note: We do NOT make a test API call at startup (to avoid
+burning quota). Availability is based on key presence.
+If the key is invalid, we discover it on first call
+and mark the provider unavailable then.
+
+text
+
+
+### 3. Edge Cases Mitigated
+
+| # | Edge Case | Mitigation | Code Location |
+|---|---|---|---|
+| 1 | Ollama not running | ConnectionError caught; marked unavailable; fallback to external | `local_llm.py:_detect()` |
+| 2 | Multiple local models found | Priority: config preferred → interactive CLI → first available | `local_llm.py:_select_model()` |
+| 3 | API key missing from env | Logged as ERROR; provider marked unavailable at init time | `*_client.py:_initialize()` |
+| 4 | API rate limit hit (429) | Token bucket pre-check; if hit, retry with backoff; then fallback | `*_client.py:generate()` + `router.py` |
+| 5 | API returns malformed JSON | Parsed defensively; specific `MalformedResponseError` raised | `*_client.py:_parse_response()` |
+| 6 | Context length > all API limits | `ContextTooLargeError` raised with clear message | `router.py:_decide_provider()` |
+| 7 | Network timeout | `requests.Timeout` caught; retried via tenacity; then fallback | `*_client.py:generate()` |
+| 8 | Daily quota exceeded (402) | Classified as `QuotaExceededError`; provider marked unavailable | `*_client.py:_classify_error()` |
+| 9 | User interrupts model selection | `KeyboardInterrupt`/`EOFError` caught; uses default | `local_llm.py:_interactive_model_prompt()` |
+| 10 | All AI backends unavailable | `NoAIAvailableError` raised with decision metadata; caller handles | `router.py:generate()` |
+| 11 | Auth error (401/403) | Provider permanently marked unavailable until refresh | `*_client.py:generate()` |
+| 12 | Ollama returns empty response | Logged as WARNING; empty string returned (caller can check) | `local_llm.py:generate()` |
+| 13 | Preferred provider requested but unavailable | Logs warning; falls through to normal routing | `router.py:_decide_provider()` |
+| 14 | Config file missing/corrupt | Fallback to built-in defaults; logs warning | `router.py:_load_config()` |
+| 15 | Provider fails mid-chain | Fallback chain continues; last error preserved | `router.py:generate()` |
+| 16 | Unexpected exception from provider | Caught by broad `except`; logged with traceback; fallback continues | `router.py:generate()` |
+| 17 | Non-interactive terminal (EOFError on input) | Caught and handled; uses default model | `local_llm.py:_interactive_model_prompt()` |
+
+### 4. Remaining Loopholes & Future Improvements
+
+| # | Issue | Severity | Future Fix |
+|---|---|---|---|
+| 1 | **Token bucket is in-process only** — multi-worker deployments won't share state | Medium | Integrate Redis-backed rate limiter from `core.rate_limiter` |
+| 2 | **No startup API validation** — invalid keys only discovered on first call | Low | Optional health-check API call with minimal prompt at startup |
+| 3 | **Token counting is estimated** — caller provides `context_length`, no actual tokenizer | Medium | Add `tiktoken` or model-specific tokenizer for accurate counts |
+| 4 | **No streaming support** — all generation is request/response | Low | Add streaming generator for real-time output to CLI |
+| 5 | **No cost tracking** — API costs not calculated or tracked | Medium | Add per-provider cost-per-token tracking and daily budget alerts |
+| 6 | **Rate limiter uses `time.sleep` in acquire** — blocks thread | Medium | Async-native rate limiter using `asyncio.sleep` for async path |
+| 7 | **No circuit breaker pattern** — a consistently failing API keeps being retried | Medium | Add circuit breaker that trips after N consecutive failures |
+| 8 | **No prompt sanitization** — prompts are passed through as-is | Low | Add input validation and prompt injection detection |
+| 9 | **No response caching** — identical prompts re-sent to APIs | Low | Add hash-based response cache with TTL |
+| 10 | **Singleton not thread-safe** — `get_router()` has race condition | Low | Use `threading.Lock` or `contextvars` for proper singleton |
+| 11 | **No model-specific context limits for Ollama** — assumes all local models can handle any context ≤ 8k | Low | Query model metadata from Ollama for actual context window |
+| 12 | **Groq model context limit hardcoded** — different Groq models have different limits | Low | Map model name → context limit dynamically |
+
+### 5. Performance Considerations
+
+| Aspect | Design Choice | Trade-off |
+|---|---|---|
+| **Startup latency** | Ollama detection is synchronous (~5s max if timeout) | Blocks startup but only happens once; acceptable for CLI tool |
+| **Rate limiter** | In-process token bucket (O(1) per acquire) | Zero external dependencies; won't work across processes |
+| **Retry backoff** | Exponential: 1s → 2s → 4s (capped at 30s) | Balances responsiveness vs. API hammering |
+| **Fallback chain** | Pre-computed at routing time, not re-evaluated mid-chain | A provider could become available during fallback; acceptable |
+| **aiohttp sessions** | Created per-call (not pooled) | Slight overhead; acceptable for infrequent AI calls |
+| **Config loading** | YAML parsed once at init; no hot-reload | Call `refresh()` or create new router for config changes |
+| **Logging** | Every routing decision logged at INFO level | Provides audit trail; can be noisy in high-throughput scenarios |
+| **Memory** | Rate limiter state is ~40 bytes per provider | Negligible |
+
+### 6. Integration Notes
+
+**How other modules call the router:**
+
+```python
+# ── Simple usage (recommended) ──────────────────────────
+from modules.ai_routing import get_router, TaskRequest, TaskComplexity, NoAIAvailableError
+
+router = get_router()  # Singleton, auto-configured
+
+try:
+    analysis = router.generate(TaskRequest(
+        task_type="xss_analysis",
+        prompt=f"Analyze this response for reflected XSS:\n{http_response}",
+        context_length=len(http_response) // 4,  # rough token estimate
+        complexity=TaskComplexity.MEDIUM,
+    ))
+except NoAIAvailableError:
+    # Deterministic fallback — regex-based analysis, etc.
+    analysis = fallback_xss_check(http_response)
+
+
+# ── Async usage ─────────────────────────────────────────
+import asyncio
+
+async def analyze_async():
+    router = get_router()
+    result = await router.async_generate(TaskRequest(
+        task_type="payload_gen",
+        prompt="Generate SQLi payloads for MySQL with WAF bypass...",
+        context_length=500,
+        complexity=TaskComplexity.COMPLEX,
+        preferred_provider="deepseek",  # Good at code/payloads
+    ))
+    return result
+
+
+# ── Force specific provider ─────────────────────────────
+result = router.generate(TaskRequest(
+    task_type="large_code_review",
+    prompt=huge_codebase_text,
+    context_length=150_000,  # Will auto-route to Gemini
+    complexity=TaskComplexity.COMPLEX,
+))
+
+
+# ── Check availability before batch processing ──────────
+providers = router.get_available_providers()
+# {'local': True, 'gemini': True, 'deepseek': False, 'groq': True}
+
+if not any(providers.values()):
+    print("No AI available — running in deterministic mode.")
+
+
+# ── Refresh after network recovery ──────────────────────
+router.refresh()  # Re-detect all backends
+Integration with shared.logger:
+
+All modules use Python's standard logging module with logger names prefixed
+centaur_jarvis.ai_routing.*. The parent application should configure the
+centaur_jarvis logger hierarchy to route to appropriate handlers (file, console,
+structured JSON, etc.).
+
+Python
+
+# In your main application setup:
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s"
+)
+
+# Or integrate with shared.logger if it provides a custom handler:
+# from shared.logger import setup_module_logger
+# setup_module_logger("centaur_jarvis.ai_routing", level="DEBUG")

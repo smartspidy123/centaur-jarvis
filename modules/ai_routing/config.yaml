@@ -1,0 +1,75 @@
+# modules/ai_routing/config.yaml
+# AI Router Configuration with RAG Integration
+
+# ─────────────────────────────────────────────
+# Provider Configuration
+# ─────────────────────────────────────────────
+
+providers:
+  primary: "openai"
+  fallback_chain:
+    - "openai"
+    - "anthropic"
+    - "ollama"
+
+  openai:
+    model: "gpt-4o"
+    api_key_env: "OPENAI_API_KEY"
+    max_tokens: 4096
+    temperature: 0.3
+    timeout: 60
+
+  anthropic:
+    model: "claude-sonnet-4-20250514"
+    api_key_env: "ANTHROPIC_API_KEY"
+    max_tokens: 4096
+    temperature: 0.3
+    timeout: 60
+
+  ollama:
+    model: "llama3.1:8b"
+    base_url: "http://localhost:11434"
+    max_tokens: 4096
+    temperature: 0.3
+    timeout: 120
+
+# ─────────────────────────────────────────────
+# Complexity Routing
+# ─────────────────────────────────────────────
+routing:
+  auto_select: true
+  complexity_thresholds:
+    low: "ollama"
+    medium: "openai"
+    high: "anthropic"
+    critical: "anthropic"
+
+# ─────────────────────────────────────────────
+# RAG Integration (NEW)
+# ─────────────────────────────────────────────
+rag:
+  enabled: true                      # Set to false to bypass RAG entirely
+  knowledge_base_path: null          # Not needed; uses SecurityKnowledgeBase defaults
+  search_limit: 5                    # Number of context snippets to fetch from Zilliz
+  min_score: 0.5                     # Minimum similarity score threshold (0.0–1.0)
+  max_context_length: 2000           # Max total characters from all combined snippets
+  inject_mode: "prepend"             # "prepend" context before prompt, or "append" after
+  search_timeout: 5.0                # Timeout in seconds for RAG search call
+  cache_enabled: false               # Future: enable caching of RAG results
+  cache_ttl: 300                     # Future: cache TTL in seconds
+
+# ─────────────────────────────────────────────
+# Telemetry & Retry
+# ─────────────────────────────────────────────
+telemetry:
+  enabled: true
+  log_prompts: false                 # Avoid logging sensitive payloads in prod
+  log_rag_context: false             # Log RAG snippets at DEBUG level only
+
+retry:
+  max_retries: 3
+  backoff_factor: 2.0
+  retry_on:
+    - "timeout"
+    - "rate_limit"
+    - "server_error"

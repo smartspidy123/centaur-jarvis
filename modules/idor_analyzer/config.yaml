@@ -1,0 +1,48 @@
+# ──────────────────────────────────────────────────
+# IDOR Analyzer – default configuration
+# ──────────────────────────────────────────────────
+
+redis:
+  task_queue: "queue:idor"
+  result_queue: "results:incoming"
+  status_prefix: "task:status:"
+  # Connection params — overridable via env vars
+  host: "localhost"
+  port: 6379
+  db: 0
+  password: null
+  # Token keys (populated by token harvester)
+  token_key_prefix: "auth:token:"
+
+execution:
+  timeout: 30                 # seconds per HTTP request
+  follow_redirects: true
+  verify_ssl: false           # typically false in VAPT lab environments
+  max_response_bytes: 5242880 # 5 MiB — truncate beyond this
+  max_retries: 2              # per-request retries on transient errors
+  retry_backoff: 1.0          # seconds between retries
+  user_agent: "Centaur-Jarvis/IDOR-Analyzer/1.0"
+
+comparison:
+  ignore_fields:
+    - "timestamp"
+    - "nonce"
+    - "csrf.*"
+    - "request_id"
+    - "trace_id"
+    - "elapsed"
+    - "server_time"
+  ignore_headers:
+    - "date"
+    - "set-cookie"
+    - "x-request-id"
+    - "x-trace-id"
+    - "cf-ray"
+    - "server-timing"
+  diff_threshold: 0.80        # similarity ratio ≥ this → "same enough"
+  max_diff_keys: 200          # cap on number of diff keys reported
+
+worker:
+  poll_interval: 1            # seconds between BRPOP timeout cycles
+  result_buffer_max: 100      # in-memory buffer when Redis unreachable
+  heartbeat_interval: 15      # seconds between heartbeat pings

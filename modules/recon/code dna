@@ -1,0 +1,351 @@
+# 📋 Deep Dive Post-Mortem (DNA)
+
+## ASCII Diagram: Worker Lifecycle
+┌───────────────────────────────────────────────────────────────────────┐
+│ CENTAUR-JARVIS RECON WORKER │
+│ │
+│ ┌──────────────────────────────────────────────────────────────────┐ │
+│ │ STARTUP PHASE │ │
+│ │ 1. Load config.yaml + env overrides │ │
+│ │ 2. Generate worker_id (hostname-PID if "auto") │ │
+│ │ 3. Check tool binaries (subfinder, httpx, nuclei, naabu) │ │
+│ │ 4. Connect to Redis (exponential backoff) │ │
+│ │ 5. Start heartbeat thread (daemon) │ │
+│ │ 6. Start resource monitor thread (daemon) │ │
+│ │ 7. Install SIGTERM/SIGINT handlers │ │
+│ └──────────────────────┬───────────────────────────────────────────┘ │
+│ │ │
+│ ▼ │
+│ ┌──────────────────────────────────────────────────────────────────┐ │
+│ │ MAIN BLPOP LOOP │ │
+│ │ │ │
+│ │ ┌─────────────┐ ┌──────────────┐ ┌────────────────────┐ │ │
+│ │ │ RAM > 90%? │─Y─▶│ Wait for RAM │ │ Flush buffered │ │ │
+│ │ │ │ │ to drop │ │ results to Redis │ │ │
+│ │ └──────┬──────┘ └──────────────┘ └────────────────────┘ │ │
+│ │ │N │ │
+│ │ ▼ │ │
+│ │ ┌──────────────────────────────────────────────────────────┐ │ │
+│ │ │ BLPOP queue:recon (timeout=5s) │ │ │
+│ │ │ │ │ │
+│ │ │ timeout? ──────────▶ loop back (check shutdown flag) │ │ │
+│ │ │ got task? ──────────▶ continue below │ │ │
+│ │ └──────────────────────┬───────────────────────────────────┘ │ │
+│ │ │ │ │
+│ │ ▼ │ │
+│ │ ┌──────────────────────────────────────────────────────────┐ │ │
+│ │ │ TASK PROCESSING PIPELINE │ │ │
+│ │ │ │ │ │
+│ │ │ ┌─────────────────────────┐ │ │ │
+│ │ │ │ 1. JSON.loads(payload) │──fail──▶ FAILED (bad JSON) │ │ │
+│ │ │ └────────────┬────────────┘ │ │ │
+│ │ │ │ │ │ │
+│ │ │ ┌─────────────────────────┐ │ │ │
+│ │ │ │ 2. Task.from_dict() │──fail──▶ FAILED (schema) │ │ │
+│ │ │ │ validate type/target │ │ │ │
+│ │ │ └────────────┬────────────┘ │ │ │
+│ │ │ │ │ │ │
+│ │ │ ┌─────────────────────────┐ │ │ │
+│ │ │ │ 3. HSET task:{id} │ │ │ │
+│ │ │ │ status=PROCESSING │ │ │ │
+│ │ │ └────────────┬────────────┘ │ │ │
+│ │ │ │ │ │ │
+│ │ │ ┌─────────────────────────────────────────────┐ │ │ │
+│ │ │ │ 4. DISPATCH to task function │ │ │ │
+│ │ │ │ ┌──────────────────────────────────────┐ │ │ │ │
+│ │ │ │ │ a. Validate target (regex allowlist) │ │ │ │ │
+│ │ │ │ │ b. Resolve tool path (which/abs) │ │ │ │ │
+│ │ │ │ │ c. Merge default_params + task.params│ │ │ │ │
+│ │ │ │ │ d. Build command list (no shell=True)│ │ │ │ │
+│ │ │ │ │ e. subprocess.Popen (new session) │ │ │ │ │
+│ │ │ │ │ f. communicate(timeout=300s) │ │ │ │ │
+│ │ │ │ │ g. Check output size (50MB guard) │ │ │ │ │
+│ │ │ │ └──────────────────────────────────────┘ │ │ │ │
+│ │ │ │ │ │ │ │
+│ │ │ │ Returns: TaskExecResult(stdout, stderr, │ │ │ │
+│ │ │ │ returncode, error, error_type, │ │ │ │
+│ │ │ │ tool_version) │ │ │ │
+│ │ │ └─────────────┬───────────────────────────────┘ │ │ │
+│ │ │ │ │ │ │
+│ │ │ ┌─────────────────────────┐ │ │ │
+│ │ │ │ 5. PARSE output │ │ │ │
+│ │ │ │ get_parser(tool_key) │ │ │ │
+│ │ │ │ Line-by-line JSON │ │ │ │
+│ │ │ │ Regex fallback │ │ │ │
+│ │ │ │ Skip malformed lines │ │ │ │
+│ │ │ └────────────┬────────────┘ │ │ │
+│ │ │ │ │ │ │
+│ │ │ ┌─────────────────────────┐ │ │ │
+│ │ │ │ 6. Build TaskResult │ │ │ │
+│ │ │ │ HSET task:{id} │ │ │ │
+│ │ │ │ status=COMPLETED │ │ │ │
+│ │ │ └────────────┬────────────┘ │ │ │
+│ │ │ │ │ │ │
+│ │ │ ┌─────────────────────────┐ │ │ │
+│ │ │ │ 7. RPUSH results: │ │ │ │
+│ │ │ │ incoming │ │ │ │
+│ │ │ │ (or buffer if Redis │ │ │ │
+│ │ │ │ is down) │ │ │ │
+│ │ │ └─────────────────────────┘ │ │ │
+│ │ └──────────────────────────────────────────────────────────┘ │ │
+│ │ │ │ │
+│ │ ▼ │ │
+│ │ ┌─────────────────────┐ │ │
+│ │ │ Shutdown flag set? │──Y──▶ EXIT CLEANLY │ │
+│ │ │ │──N──▶ LOOP BACK │ │
+│ │ └─────────────────────┘ │ │
+│ └──────────────────────────────────────────────────────────────────┘ │
+│ │
+│ ┌──────────────────────── DAEMON THREADS ──────────────────────────┐ │
+│ │ │ │
+│ │ HEARTBEAT THREAD RESOURCE MONITOR THREAD │ │
+│ │ ┌─────────────────┐ ┌──────────────────────────┐ │ │
+│ │ │ Every 30s: │ │ Every 10s: │ │ │
+│ │ │ SETEX worker: │ │ Check psutil.virtual_ │ │ │
+│ │ │ heartbeat:{id} │ │ memory().percent │ │ │
+│ │ │ TTL=60s │ │ If > 90%: clear _ram_ok │ │ │
+│ │ │ JSON payload: │ │ If ≤ 90%: set _ram_ok │ │ │
+│ │ │ - timestamp │ └──────────────────────────┘ │ │
+│ │ │ - processing │ │ │
+│ │ │ - ram_pct │ │ │
+│ │ │ - tool_health │ │ │
+│ │ └─────────────────┘ │ │
+│ └──────────────────────────────────────────────────────────────────┘ │
+└───────────────────────────────────────────────────────────────────────┘
+
+text
+
+
+---
+
+## Subprocess Management Deep Dive
+
+### How Subprocesses Are Spawned & Controlled
+┌─────────────────────────────────────────────────────────────┐
+│ SUBPROCESS MANAGEMENT │
+│ │
+│ 1. SPAWN │
+│ • subprocess.Popen(cmd_list, shell=False) │
+│ • start_new_session=True → own process group │
+│ • stdin = DEVNULL (no interactive input) │
+│ • stdout/stderr = PIPE (captured) │
+│ │
+│ 2. TIMEOUT ENFORCEMENT │
+│ • proc.communicate(timeout=task_timeout) │
+│ • If TimeoutExpired: │
+│ ├─ os.killpg(pgid, SIGKILL) ← kills entire group │
+│ ├─ proc.wait(timeout=5) ← reap zombie │
+│ └─ Return error_type="TIMEOUT" │
+│ │
+│ 3. OUTPUT SIZE GUARD │
+│ • Post-execution: len(stdout) checked vs 50MB limit │
+│ • If exceeded: MemoryError → error_type="TOOL_ERROR" │
+│ │
+│ 4. EXIT CODE HANDLING │
+│ • rc == 0 → success path → parse output │
+│ • rc != 0 → capture stderr → error_type="TOOL_ERROR" │
+│ • Special: nuclei rc != 0 with "no results" → OK │
+│ │
+│ 5. SECURITY │
+│ • shell=False prevents shell injection │
+│ • Target validated against strict regex allowlist │
+│ • No string interpolation into commands │
+│ • Command built as list: ["tool", "-d", target] │
+│ • Process group isolation for clean kill │
+└─────────────────────────────────────────────────────────────┘
+
+text
+
+
+**Key decision: `start_new_session=True`**
+When a tool like naabu spawns child processes (e.g., for SYN scanning), a simple `proc.kill()` only kills the parent. By using `start_new_session=True`, we get a new process group, and `os.killpg()` kills the entire tree — no orphaned processes.
+
+---
+
+## Edge Cases Mitigated
+
+| # | Edge Case | Mitigation | Code Location |
+|---|-----------|------------|---------------|
+| 1 | Tool not installed | `_check_tools()` at startup + `_resolve_tool()` per-task returns `TOOL_MISSING` | `worker.py:_check_tools`, `tasks.py:_resolve_tool` |
+| 2 | Tool version mismatch | `_get_tool_version()` captures version string; logged in result's `tool_version` field | `tasks.py:_get_tool_version` |
+| 3 | Output too large (>50MB) | Size guard in `_run_subprocess()` raises `MemoryError` | `tasks.py:_run_subprocess` |
+| 4 | Malformed JSON line | `BaseParser.parse()` catches per-line exceptions, logs warning, continues | `parsers.py:BaseParser.parse` |
+| 5 | Invalid target domain | `_validate_target()` regex allowlist blocks shell metacharacters | `tasks.py:_validate_target` |
+| 6 | Network unreachable | Tool times out → subprocess timeout → `TIMEOUT` error | `tasks.py:_run_subprocess` |
+| 7 | Worker OOM (RAM >90%) | `_resource_monitor_loop()` pauses task acceptance via `_ram_ok` event | `worker.py:_resource_monitor_loop` |
+| 8 | Redis connection lost | `_ensure_redis()` reconnects with exponential backoff; results buffered in-memory | `worker.py:_ensure_redis`, `_push_result` |
+| 9 | Duplicate task | Worker processes idempotently; dedup is orchestrator's responsibility but task_id tracking helps | `worker.py:_process_one` |
+| 10 | Missing params | `merged_params = {**default_params, **task.params}` fills from config defaults | `worker.py:_execute_task` |
+| 11 | Subprocess hangs | `communicate(timeout=N)` + `killpg(SIGKILL)` ensures no zombie | `tasks.py:_run_subprocess` |
+| 12 | Multiple workers on same host | `worker_id = "recon-{hostname}-{PID}"` guarantees uniqueness | `worker.py:_load_config` |
+| 13 | Graceful shutdown | SIGTERM/SIGINT caught; `_shutdown_event` lets current task finish | `worker.py:_handle_signal` |
+| 14 | Empty tool output | Parser detects and returns `count: 0` with warning | `parsers.py:BaseParser.parse` |
+| 15 | Invalid JSON task payload | Caught in `_process_one`, returns FAILED result | `worker.py:_process_one` |
+| 16 | Unknown task type | `TASK_DISPATCH.get()` returns None → FAILED with UNKNOWN error | `worker.py:_execute_task` |
+| 17 | Result buffer overflow | Hard limit (`result_buffer_limit`); excess results are dropped with ERROR log | `worker.py:_push_result` |
+| 18 | Shell injection via params | All params validated/sanitised; `shell=False` in Popen | `tasks.py` throughout |
+| 19 | Config file missing | `FileNotFoundError` raised explicitly with searched paths listed | `worker.py:_load_config` |
+| 20 | Nuclei non-zero exit on "no results" | Special-cased: treated as success with empty findings | `tasks.py:nuclei_task` |
+
+---
+
+## Remaining Loopholes & Future Improvements
+
+| Priority | Gap | Improvement |
+|----------|-----|-------------|
+| 🔴 High | No streaming output size guard during execution | Implement line-by-line streaming with byte counter; kill process mid-stream if threshold exceeded (currently only post-mortem check) |
+| 🔴 High | No mTLS for Redis | Use `redis.Redis(ssl=True, ssl_certfile=..., ssl_keyfile=...)` in production |
+| 🟡 Medium | No task deduplication at worker level | Add bloom filter or Redis `SISMEMBER` check before execution |
+| 🟡 Medium | No rate limiting between tasks | Add configurable delay between task completions to prevent resource spike |
+| 🟡 Medium | Single-threaded execution | Consider `asyncio` or worker pool for parallel task execution (with resource bounds) |
+| 🟡 Medium | No Prometheus/OpenTelemetry metrics | Add `prometheus_client` counters for tasks_processed, errors, latency histograms |
+| 🟢 Low | Tool auto-installation | Auto-download missing tools via `go install` on first run |
+| 🟢 Low | No task priority queue | Support multiple priority queues (e.g., `queue:recon:critical`, `queue:recon:normal`) |
+| 🟢 Low | Config hot-reload | Watch config file for changes and reload without restart |
+| 🟢 Low | Result compression | gzip large results before pushing to Redis |
+
+---
+
+## Performance Considerations
+
+### Memory
+- **Parser streaming**: Output is split by newlines and processed line-by-line. The full stdout string is held in memory during `communicate()`, bounded by the 50MB size guard.
+- **Result buffer**: Capped at `result_buffer_limit` (default 100) entries when Redis is down.
+- **RAM monitor**: psutil-based check every 10s; pauses task acceptance above threshold.
+
+### CPU
+- **Subprocess isolation**: Tools run in their own process group; worker's Python process stays lightweight (just I/O + parsing).
+- **No busy-waiting**: BLPOP with timeout means the main thread sleeps on the Redis connection, consuming zero CPU when idle.
+- **Parser regex**: Pre-compiled `re.compile()` patterns, not compiled per-line.
+
+### I/O
+- **Redis round-trips**: Minimised — one BLPOP (blocking), one HSET (status update), one RPUSH (result). Three round-trips per task.
+- **Temp files**: Only httpx in multi-target mode creates a temp file; cleaned up in `finally` block.
+
+### Scalability
+- **Horizontal**: Spin up N workers pointing to the same Redis. Each gets tasks via atomic BLPOP. Zero coordination needed.
+- **Vertical**: Increase `threads` in tool params for tools that support it (subfinder, httpx).
+
+---
+
+## Integration Notes
+
+### How the Orchestrator Sends Tasks
+
+```python
+# Orchestrator side — pushing a task
+import json, redis
+
+r = redis.Redis()
+
+task = {
+    "task_id": "uuid-1234-5678",
+    "type": "RECON_SUBDOMAIN",        # Must match TaskType enum
+    "target": "example.com",
+    "params": {                        # Tool-specific overrides
+        "recursive": True,
+        "threads": 20,
+    },
+    "priority": 0,
+    "max_retries": 3,
+    "metadata": {
+        "scan_id": "scan-abc",
+        "requested_by": "ai-core",
+    }
+}
+
+r.lpush("queue:recon", json.dumps(task))
+
+# Task status can be monitored:
+r.hgetall("task:uuid-1234-5678")
+# → {"status": "PROCESSING", "worker_id": "recon-kali-12345", ...}
+How Results Are Structured
+JSON
+
+{
+  "task_id": "uuid-1234-5678",
+  "status": "COMPLETED",
+  "data": {
+    "subdomains": ["sub1.example.com", "sub2.example.com"],
+    "count": 2,
+    "sources": {"crtsh": 1, "virustotal": 1},
+    "_meta": {
+      "raw_lines": 3,
+      "parsed_count": 2,
+      "failed_lines": 0,
+      "warnings": []
+    }
+  },
+  "error": null,
+  "error_type": "NONE",
+  "worker_id": "recon-kali-12345",
+  "execution_time": 12.34,
+  "completed_at": 1700000000.0,
+  "tool_version": "subfinder v2.6.3",
+  "raw_output_lines": 3,
+  "parse_warnings": []
+}
+Error Result Example
+JSON
+
+{
+  "task_id": "uuid-fail-0001",
+  "status": "FAILED",
+  "data": {},
+  "error": "Tool not found: /usr/bin/subfinder",
+  "error_type": "TOOL_MISSING",
+  "worker_id": "recon-kali-12345",
+  "execution_time": 0.001,
+  "completed_at": 1700000000.0,
+  "tool_version": "",
+  "raw_output_lines": 0,
+  "parse_warnings": []
+}
+Redis Key Layout
+text
+
+queue:recon                    ← LIST: pending tasks (LPUSH/BLPOP)
+results:incoming               ← LIST: completed results (RPUSH/BLPOP)
+task:{task_id}                 ← HASH: status, worker_id, updated_at
+worker:heartbeat:{worker_id}   ← STRING: JSON blob, TTL=60s
+Testing Instructions
+Bash
+
+# 1. Start Redis
+redis-server
+
+# 2. (Optional) Install tools for real execution tests
+#    Or run parser-only tests which don't need tools
+
+# 3. Run unit tests
+cd /path/to/centaur-jarvis
+pytest modules/recon/tests/ -v
+
+# 4. Run the worker
+python modules/recon/worker.py
+
+# 5. Push a test task (in another terminal)
+redis-cli LPUSH queue:recon '{
+  "task_id": "test-sub-001",
+  "type": "RECON_SUBDOMAIN",
+  "target": "example.com",
+  "params": {}
+}'
+
+# 6. Watch logs
+tail -f logs/recon_worker.log | python -m json.tool
+
+# 7. Check results
+redis-cli LRANGE results:incoming 0 -1
+
+# 8. Check heartbeat
+redis-cli GET worker:heartbeat:recon-$(hostname)-$(pgrep -f worker.py)
+
+# 9. Test graceful shutdown
+kill -SIGTERM $(pgrep -f worker.py)
+# Worker should finish current task and exit cleanly
+
+# 10. Test error cases
+redis-cli LPUSH queue:recon '{"bad json'
+redis-cli LPUSH queue:recon '{"task_id":"t2","type":"INVALID_TYPE","target":"x"}'
+redis-cli LPUSH queue:recon '{"task_id":"t3","type":"RECON_SUBDOMAIN","target":"$(evil)"}'

@@ -1,0 +1,86 @@
+# ===========================================================================
+# Centaur-Jarvis  —  Recon Worker Configuration
+# ===========================================================================
+# Copy this file to config.local.yaml for environment-specific overrides.
+# Every key has a sensible default so the worker can start without editing.
+# ===========================================================================
+
+redis:
+  host: "127.0.0.1"
+  port: 6379
+  db: 0
+  password: null                 # set via REDIS_PASSWORD env-var preferred
+  socket_timeout: 30              # seconds
+  socket_connect_timeout: 5
+  retry_on_timeout: true
+  max_reconnect_attempts: 10
+  reconnect_backoff_base: 2      # exponential backoff base (seconds)
+
+# Worker identity ─ auto-generated from hostname+PID when left as "auto"
+worker_id: "auto"
+
+# Queue names
+queue:
+  inbound: "queue:recon"
+  results: "results:incoming"
+  blpop_timeout: 5               # seconds; keeps the event-loop responsive
+
+# Heartbeat
+heartbeat_interval: 30           # seconds
+heartbeat_ttl: 60                # Redis key expiry
+
+# Task execution
+task_timeout: 300                # max wall-clock seconds per subprocess
+shutdown_timeout: 30             # max seconds to wait for current task on SIGTERM
+
+# Resource guardrails
+resources:
+  max_ram_pct: 90                # pause accepting tasks above this %
+  ram_check_interval: 10         # seconds between psutil checks
+  max_output_bytes: 52428800     # 50 MB — kill tool if stdout exceeds this
+  result_buffer_limit: 100       # max results buffered when Redis is down
+
+# Per-tool configuration
+tools:
+  subfinder:
+    path: "subfinder"            # will be resolved via `which` if relative
+    version_flag: "-version"
+    default_params:
+      threads: 10
+      timeout: 30
+      recursive: false
+  httpx:
+    path: "httpx"
+    version_flag: "-version"
+    default_params:
+      threads: 50
+      status_code: true
+      tech_detect: true
+      follow_redirects: true
+  nuclei:
+    path: "nuclei"
+    version_flag: "-version"
+    default_params:
+      rate_limit: 150
+      severity: "critical,high,medium"
+      templates: ""              # empty = use all default templates
+      tags: ""
+  naabu:
+    path: "naabu"
+    version_flag: "-version"
+    default_params:
+      rate: 1000
+      ports: "top-1000"
+      timeout: 10
+
+# Logging
+logging:
+  level: "INFO"
+  file: "logs/recon_worker.log"
+
+# Target validation
+target_validation:
+  max_domain_length: 253
+  allowed_tld_pattern: "^[a-zA-Z]{2,63}$"
+  # Reject obviously-internal targets in production
+  reject_internal: false

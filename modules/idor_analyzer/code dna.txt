@@ -1,0 +1,164 @@
+
+---
+
+## Deep Dive Post‑Mortem (DNA)
+
+### 1. Response Normalization & Diff Logic
+
+The comparison pipeline follows a multi-layer strategy:
+
+Raw Response
+│
+▼
+ResponseData.from_requests_response()
+│ • Lowercase all header keys
+│ • Decode body to UTF-8 (lossy)
+│ • Attempt JSON parse if Content-Type indicates JSON
+│ • Compute SHA-256 of raw body
+│ • Truncate at max_response_bytes
+▼
+_strip_ignored_fields()
+│ • Recursively traverse JSON tree
+│ • Remove keys matching ignore_fields regex patterns
+│ • E.g., "timestamp", "nonce", "csrf.*" are stripped
+▼
+compare_responses()
+│
+├── Status code comparison (exact match)
+│
+├── Header comparison
+│ • Skip headers in ignore_headers list
+│ • Report diffs for remaining headers
+│
+├── Body comparison
+│ ├── JSON path: _compare_json() recursive deep diff
+│ │ • Tracks added/removed/changed keys at each path
+│ │ • Respects max_diff_keys to cap output size
+│ │ • Max recursion depth = 50
+│ │
+│ └── Text path: SequenceMatcher ratio
+│ • Capped at 500K chars for performance
+│
+└── Suspicion evaluation (_evaluate_suspicion)
+• Scenario matrix (both 2xx, A 2xx / B 403, etc.)
+• Confidence scoring based on similarity ratio
+• Generates human-readable notes
+
+text
+
+
+**Key design choice**: The comparator is **stateless** — it receives two `ResponseData` objects and returns a `ComparisonResult`. This makes it trivially testable and reusable across different modules.
+
+### 2. Edge Cases Mitigated
+
+| # | Edge Case | Mitigation | Code Reference |
+|---|-----------|------------|----------------|
+| 1 | Auth tokens missing from payload AND Redis | `SessionError` raised with `error_type="AUTH_MISSING"` → task marked `FAILED` | `session_manager.py:load_sessions()`, `analyzer.py:_process_raw_task()` |
+| 2 | Target unreachable / timeout | `max_retries` with exponential backoff; `ResponseData.from_error()` captures the error; comparator handles error responses gracefully | `analyzer.py:_make_request()`, `comparators.py:compare_responses()` error branch |
+| 3 | Non-IDOR differences (different resources) | Similarity threshold + suspicion heuristics; if similarity < 50%, noted as "likely different resources" | `comparators.py:_evaluate_suspicion()` |
+| 4 | Dynamic fields (timestamp, nonce) | Regex-based `ignore_fields` stripped before comparison via `_strip_ignored_fields()` | `comparators.py:_strip_ignored_fields()`, `_is_ignored_field()` |
+| 5 | Large response bodies | `max_response_bytes` truncation in `ResponseData.from_requests_response()`; `SequenceMatcher` capped at 500K chars | `comparators.py:ResponseData.from_requests_response()`, `_text_similarity()` |
+| 6 | Redis connection lost | `RedisManager` auto-reconnects; results buffered in memory (max 100); drained on reconnection or shutdown | `analyzer.py:RedisManager.push_result()`, `_drain_buffer()`, `drain_all()` |
+| 7 | Duplicate tasks | Noted as orchestrator responsibility; worker is idempotent per task_id | `README.md` |
+| 8 | Invalid task JSON | `json.JSONDecodeError` caught, logged with raw payload snippet, task skipped | `analyzer.py:_process_raw_task()` |
+| 9 | SIGTERM during processing | Signal handler sets `_shutdown_requested`; loop checks flag between endpoints; buffer drained before exit | `analyzer.py:_handle_sigterm()`, `_execute_task()` loop check, `run()` drain |
+
+### 3. Remaining Loopholes & Future Improvements
+
+| Area | Current Gap | Future Enhancement |
+|------|------------|-------------------|
+| **Semantic IDOR detection** | Comparator is purely structural; can't determine if returned data *belongs* to the wrong user | Integrate an LLM or rule engine to interpret field semantics (e.g., "this `user_id` field changed from 1 to 2") |
+| **Multi-step IDOR** | Only single-request comparisons; can't detect IDORs requiring a sequence of requests | Add workflow support: "create resource as A → access as B" |
+| **Token refresh** | Tokens are loaded once at task start; long-running tasks may see token expiry | Implement `SessionManager.refresh_token()` with re-auth flow |
+| **Parameterized testing** | User must supply explicit endpoint list | Auto-generate endpoint variants (e.g., `/user/{1..100}`) from a pattern |
+| **Rate limiting** | No throttling between requests | Add configurable `requests_per_second` with token-bucket limiter |
+| **XML/GraphQL support** | Body comparison is JSON-only for structured diff; XML falls back to text | Add XML DOM diff and GraphQL query-aware comparison |
+| **Evidence capture** | Full response bodies not stored in findings | Optionally store redacted response snippets as evidence |
+| **Parallel endpoints** | Endpoints tested sequentially | Use `asyncio` or thread pool for concurrent endpoint testing |
+
+### 4. Performance Considerations
+
+| Factor | Impact | Mitigation |
+|--------|--------|------------|
+| **Number of endpoints** | Linear: 2 HTTP requests per endpoint | Sequential by design for determinism; add parallelism via config if needed |
+| **Response body size** | `SequenceMatcher` is O(n²) worst case | Truncation at `max_response_bytes` (default 5 MiB); text similarity capped at 500K chars |
+| **JSON deep diff depth** | Deeply nested JSON can cause stack pressure | Hard cap at depth=50; `max_diff_keys=200` limits output |
+| **Redis round-trips** | 1 pop + 1 status update + 1 result push per task; 1 status update during processing | Acceptable; pipelining available if needed |
+| **Memory buffer** | Max 100 results buffered at ~10KB each ≈ 1MB | Configurable; oldest dropped if full |
+
+### 5. Integration Notes
+
+**Pushing tasks** (from orchestrator or CLI):
+
+```python
+import json, redis
+
+r = redis.Redis()
+task = {
+    "task_id": "idor-test-42",
+    "target": "https://vulnerable-app.local/api/v1",
+    "endpoints": ["/account/101", "/account/102", "/orders/55"],
+    "method": "GET",
+    "auth_tokens": {
+        "userA": "eyJhbGciOi...",
+        "userB": "eyJhbGciOi...",
+        "type": "bearer"
+    }
+}
+r.lpush("queue:idor", json.dumps(task))
+
+Expected result structure (in results:incoming):
+
+JSON
+
+{
+  "task_id": "idor-test-42",
+  "module": "idor_analyzer",
+  "status": "COMPLETED",
+  "timestamp": "2024-01-15T12:00:00+00:00",
+  "data": {
+    "findings": [
+      {
+        "type": "IDOR",
+        "severity": "CRITICAL",
+        "confidence": 0.97,
+        "endpoint": "/account/101",
+        "url": "https://vulnerable-app.local/api/v1/account/101",
+        "method": "GET",
+        "details": {
+          "status_code_a": 200,
+          "status_code_b": 200,
+          "body_similarity": 0.97,
+          "notes": ["Both responses returned 2xx with body similarity 97.00%..."],
+          "differences": {"$.user_id": {"userA": 101, "userB": 101}}
+        },
+        "recommendation": "Implement object-level authorization checks...",
+        "owasp": "API1:2023 Broken Object Level Authorization",
+        "cwe": "CWE-639: Authorization Bypass Through User-Controlled Key",
+        "detected_at": "2024-01-15T12:00:01+00:00"
+      }
+    ],
+    "stats": {
+      "total_endpoints": 3,
+      "tested": 3,
+      "suspicious": 1,
+      "errors": 0,
+      "findings_count": 1,
+      "start_time": "2024-01-15T12:00:00+00:00",
+      "end_time": "2024-01-15T12:00:05+00:00"
+    },
+    "target": "https://vulnerable-app.local/api/v1",
+    "method": "GET"
+  }
+}
+
+Status keys in Redis:
+
+text
+
+task:status:idor-test-42 → {
+  "status": "COMPLETED",
+  "updated_at": "2024-01-15T12:00:05+00:00"
+}
+
+All status values are UPPERCASE: PENDING, PROCESSING, COMPLETED, FAILED, TIMEOUT.

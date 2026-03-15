@@ -1,0 +1,62 @@
+# =============================================================================
+# OAST Listener Module Configuration
+# =============================================================================
+# This file configures the Out-of-Band Application Security Testing server.
+# All settings have safe defaults.
+
+server:
+  http:
+    enabled: true
+    host: "0.0.0.0"
+    port: 8080
+    tls_enabled: false
+    tls_cert: ""
+    tls_key: ""
+    # Maximum request body size in bytes (10 KB default)
+    max_body_size: 10240
+    # Request timeout in seconds
+    request_timeout: 30
+    # Number of worker threads for the HTTP server
+    workers: 4
+
+  dns:
+    enabled: false
+    host: "0.0.0.0"
+    port: 5353          # Use 5353 for non-root; 53 requires root/cap_net_bind
+    domain: "oast.example.com"    # Base domain for DNS callbacks
+    # TTL for DNS responses
+    response_ttl: 60
+    # IP to resolve callback domains to
+    resolve_ip: "127.0.0.1"
+
+redis:
+  host: "localhost"
+  port: 6379
+  db: 0
+  password: null
+  callback_queue: "oast:callbacks"
+  payload_prefix: "oast:payload:"
+  result_queue: "results:incoming"
+  seen_set: "oast:seen"
+  stats_key: "oast:stats"
+  ttl: 86400              # Payload TTL in seconds (24 hours)
+  connection_timeout: 5
+  retry_interval: 3
+  max_retries: 10
+
+correlator:
+  enabled: true
+  poll_interval: 1        # Seconds between BRPOP calls
+  batch_size: 10          # Max callbacks to process per cycle
+  brpop_timeout: 5        # BRPOP blocking timeout in seconds
+  dedup_ttl: 172800       # How long to remember seen callback IDs (48h)
+
+logging:
+  level: "INFO"
+  json_format: true
+
+# Unique ID generation settings
+payload:
+  # Pattern for unique_id: {scan_id}-{vuln_type}-{short_uuid}
+  id_separator: "-"
+  uuid_length: 8          # Truncated UUID length for readability

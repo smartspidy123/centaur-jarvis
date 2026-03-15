@@ -1,0 +1,114 @@
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        PLAYWRIGHT RENDERER MODULE                          │
+│                                                                            │
+│  ┌──────────┐    ┌─────────────┐    ┌──────────────┐    ┌──────────────┐  │
+│  │  Redis    │    │  renderer.py│    │ intercept.py │    │   Redis      │  │
+│  │  Queue    │───▶│  (Worker)   │───▶│ (Browser     │───▶│  Results     │  │
+│  │queue:     │    │             │    │  Automation)  │    │results:      │  │
+│  │playwright │    │ • Validate  │    │              │    │incoming      │  │
+│  └──────────┘    │ • Launch    │    │ • Navigate   │    └──────────────┘  │
+│                  │ • Parse     │    │ • Intercept  │                      │
+│                  │ • Report    │    │ • Extract    │    ┌──────────────┐  │
+│                  └─────────────┘    │ • Output     │    │ Redis Hash   │  │
+│                        │           │   JSON lines │    │ task:{id}    │  │
+│                        │           └──────────────┘    │ status field │  │
+│                        │                  │            └──────────────┘  │
+│                        │                  │                   ▲          │
+│                        │                  ▼                   │          │
+│                        │           ┌──────────────┐          │          │
+│                        │           │  stdout pipe │          │          │
+│                        │           │  (JSON lines)│          │          │
+│                        │           └──────────────┘          │          │
+│                        └─────────────────────────────────────┘          │
+│                                                                          │
+│  SIGNAL HANDLING:                                                        │
+│  ┌──────────┐                                                            │
+│  │ SIGTERM   │──▶ Set shutdown_event ──▶ Finish current task ──▶ Exit   │
+│  └──────────┘                                                            │
+│                                                                          │
+│  REDIS FALLBACK:                                                         │
+│  ┌──────────┐    ┌──────────────┐    ┌──────────────┐                   │
+│  │ Push to   │──▶│ ConnectionErr│──▶│ Buffer in    │──▶ Retry on next  │
+│  │ Redis     │   │              │   │ memory (≤100)│    cycle           │
+│  └──────────┘    └──────────────┘    └──────────────┘                   │
+│                                                                          │
+│  INTERCEPTION FLOW (inside intercept.py):                                │
+│                                                                          │
+│  Browser Launch ──▶ Set request/response handlers ──▶ Navigate          │
+│       │                                                                  │
+│       ▼                                                                  │
+│  ┌─────────────────────────────────────────────────────────┐            │
+│  │  For each network request:                              │            │
+│  │  1. Check if XHR or Fetch (resource_type)               │            │
+│  │  2. Extract URL, method, headers, body                  │            │
+│  │  3. Match response to request                           │            │
+│  │  4. Detect auth tokens (JWT, Bearer, cookies)           │            │
+│  │  5. Emit JSON line to stdout                            │            │
+│  │  6. Increment counter, stop if >= max_requests          │            │
+│  └─────────────────────────────────────────────────────────┘            │
+│       │                                                                  │
+│       ▼                                                                  │
+│  ┌─────────────────────────────────────────────────────────┐            │
+│  │  After page load:                                       │            │
+│  │  1. Wait for selector (if provided)                     │            │
+│  │  2. Click elements (if provided, up to max_depth)       │            │
+│  │  3. Extract forms from DOM                              │            │
+│  │  4. Emit form findings as JSON lines                    │            │
+│  └─────────────────────────────────────────────────────────┘            │
+│       │                                                                  │
+│       ▼                                                                  │
+│  Exit with code 0 (success) or non-zero (error)                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Interception Logic Explanation
+
+The interception works by hooking into Playwright's event system at the CDP level:
+
+    Request Interception: We register a handler on page.on("request") that fires for every outgoing HTTP request. We filter to only xhr and fetch resource types (the dynamic API calls SPAs make).
+
+    Response Capture: A corresponding page.on("response") handler matches responses back to requests by URL and captures status codes, headers, and truncated bodies.
+
+    Token Detection: Every intercepted request's headers are scanned for Authorization (Bearer/JWT), Cookie, and X-*-Token patterns. JWTs are identified by the eyJ prefix pattern.
+
+    Form Extraction: After network interception, we query the DOM via page.evaluate() to extract all <form> elements, their actions, methods, and input field names/types.
+
+    Click Automation: For SPA discovery, we optionally click elements (buttons, links) to trigger additional API calls, recursing up to max_depth levels.
+
+Edge Cases Mitigated
+#	Edge Case	Mitigation	Code Location
+1	Target unreachable / DNS failure	Navigation timeout + specific error type TIMEOUT	intercept.py navigate try/except
+2	Browser binary missing / launch failure	Catch playwright._impl._errors.Error, mark FAILED with BROWSER_ERROR	renderer.py _execute_intercept
+3	Page hangs indefinitely	Hard navigation timeout from config + process-level kill timer	intercept.py timeout param + renderer.py subprocess timeout
+4	Content loads after DOMContentLoaded	wait_for_selector with configurable timeout	intercept.py post-navigation wait
+5	Infinite redirect loops	max_redirects counter (capped at 10) in navigation	intercept.py redirect tracking
+6	Explosion of XHR requests (polling, etc.)	max_requests cap, stops capturing after limit	intercept.py counter check
+7	Auth-protected pages (401/403)	Task payload can include cookies and extra_headers injected into browser context	intercept.py context creation
+8	Redis connection lost mid-processing	In-memory buffer (max 100 results), retry flush on next cycle	renderer.py _push_result_safe
+9	SIGTERM during browser automation	shutdown_event flag, finish current task, close browser, then exit	renderer.py signal handler
+10	Malformed task payload	Pydantic-style validation with defaults, skip invalid tasks with FAILED status	renderer.py _validate_task
+11	Binary response bodies (images, etc.)	Content-type check, skip non-text bodies	intercept.py response handler
+12	Empty page / no JS execution	Return empty findings with stats, not an error	intercept.py normal exit
+13	Subprocess crash (segfault, OOM)	Non-zero exit code detection, stderr capture, mark FAILED	renderer.py subprocess handling
+14	Concurrent task corruption	Each task gets its own browser context (isolation)	intercept.py new context per run
+15	Unicode/encoding issues in response bodies	UTF-8 decode with errors='replace'	intercept.py body handling
+Remaining Loopholes & Future Improvements
+
+    WebSocket interception: Currently only XHR/Fetch are captured. WebSocket frames may contain API endpoints.
+    Service Worker bypass: Service workers can cache/modify requests invisibly. Future: intercept SW registration.
+    Shadow DOM forms: page.evaluate won't pierce closed shadow DOMs. Need querySelectorAll with {shadowRoot: true}.
+    CAPTCHA/bot detection: Sophisticated sites may block headless browsers. Future: stealth plugin integration.
+    Multi-page navigation: Currently single-page focused. SPAs with hash routing may need history API monitoring.
+    Memory leaks on long-running workers: Browser contexts should be periodically recycled.
+    Proxy support: Not yet configurable per-task. Future: add proxy rotation.
+    Screenshot evidence: Could capture screenshots of interesting states for reporting.
+    Cookie jar persistence: Cross-task cookie sharing for authenticated scanning sessions.
+    Rate limiting: No per-domain rate limiting; could overwhelm targets.
+
+Performance Considerations
+
+    Browser reuse: The worker launches one browser instance and creates isolated contexts per task (faster than launching a new browser each time).
+    Response body truncation: Bodies are capped at max_response_body bytes to prevent memory explosion.
+    Request cap: max_requests prevents runaway capture on polling-heavy pages.
+    Async I/O: The intercept script uses Playwright's async API with asyncio for non-blocking operation.
+    Subprocess isolation: intercept.py runs as a subprocess, so a browser crash doesn't take down the worker.
+    Memory buffer: Redis-unavailable results are buffered but capped at 100 to prevent OOM.

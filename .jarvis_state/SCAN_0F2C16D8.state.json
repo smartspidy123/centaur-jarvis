@@ -1,0 +1,67 @@
+{
+  "scan_id": "SCAN_0F2C16D8",
+  "saved_at": "2026-03-15T01:51:40.211642+00:00",
+  "version": "1.0",
+  "state": {
+    "scan_id": "SCAN_0F2C16D8",
+    "targets": [
+      "http://localhost:42000"
+    ],
+    "profile_name": "quick",
+    "current_phase": "recon",
+    "status": "PAUSED",
+    "stats": {
+      "tasks_pushed": 1,
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "findings_count": 0,
+      "ai_calls": 0,
+      "rag_snippets": 0
+    },
+    "tool_summaries": {
+      "ports_open": [],
+      "subdomains": 0,
+      "endpoints": 0,
+      "payloads_sent": 0,
+      "interesting_responses": 0,
+      "templates_matched": 0,
+      "critical_findings": 0,
+      "technologies": []
+    },
+    "completed_tasks": {},
+    "pending_tasks": {
+      "SCAN_0F2C16D8_nuclei_9a5f78": {
+        "task_id": "SCAN_0F2C16D8_nuclei_9a5f78",
+        "scan_id": "SCAN_0F2C16D8",
+        "phase": "recon",
+        "tool": "nuclei",
+        "target": "http://localhost:42000",
+        "status": "PENDING",
+        "created_at": "2026-03-15T01:49:32.135238+00:00"
+      }
+    },
+    "events": [
+      {
+        "timestamp": "01:49:32",
+        "type": "info",
+        "message": "Connected to Redis (127.0.0.1:6379)"
+      },
+      {
+        "timestamp": "01:49:32",
+        "type": "info",
+        "message": "Scan SCAN_0F2C16D8 initialized | Profile: quick | Targets: 1"
+      },
+      {
+        "timestamp": "01:49:32",
+        "type": "info",
+        "message": "Starting phased scan: recon"
+      },
+      {
+        "timestamp": "01:49:32",
+        "type": "phase",
+        "message": "\u2501\u2501\u2501 Phase: RECON \u2501\u2501\u2501"
+      }
+    ],
+    "errors": []
+  }
+}

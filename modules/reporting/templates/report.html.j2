@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }}</title>
+    <style>
+        :root {
+            --critical: #dc3545;
+            --high: #fd7e14;
+            --medium: #ffc107;
+            --low: #28a745;
+            --info: #17a2b8;
+            --unknown: #6c757d;
+            --bg-primary: #f4f6f9;
+            --text-primary: #333;
+            --header-bg: #1a1a2e;
+            --header-accent: #0f3460;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            padding: 20px;
+            line-height: 1.6;
+        }
+
+        .container { max-width: 1400px; margin: 0 auto; }
+
+        .header {
+            background: var(--header-bg);
+            color: white;
+            padding: 30px;
+            border-radius: 10px;
+            margin-bottom: 25px;
+        }
+
+        .header h1 { font-size: 1.8em; margin-bottom: 5px; }
+        .header .meta { color: #ccc; font-size: 0.9em; }
+
+        h2 {
+            color: var(--header-accent);
+            margin: 25px 0 10px;
+            padding-bottom: 5px;
+            border-bottom: 2px solid var(--header-accent);
+        }
+
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 15px;
+            margin: 15px 0;
+        }
+
+        .summary-card {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            text-align: center;
+            transition: transform 0.2s;
+        }
+
+        .summary-card:hover { transform: translateY(-2px); }
+
+        .summary-card .number {
+            font-size: 2.2em;
+            font-weight: bold;
+            color: var(--header-accent);
+        }
+
+        .summary-card .label { color: #666; margin-top: 5px; }
+
+        .severity-bar {
+            display: flex;
+            border-radius: 8px;
+            overflow: hidden;
+            height: 30px;
+            margin: 15px 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .severity-bar .segment {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 0.75em;
+            font-weight: bold;
+            min-width: 2px;
+            transition: flex-grow 0.3s;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin: 10px 0;
+        }
+
+        th {
+            background: var(--header-bg);
+            color: white;
+            padding: 12px 8px;
+            text-align: left;
+            font-size: 0.85em;
+            position: sticky;
+            top: 0;
+        }
+
+        td {
+            padding: 10px 8px;
+            border-bottom: 1px solid #eee;
+            font-size: 0.85em;
+            vertical-align: top;
+            word-break: break-word;
+            max-width: 300px;
+        }
+
+        tr:nth-child(even) { background: #fafbfc; }
+        tr:hover { background: #f0f4f8; }
+
+        .badge {
+            padding: 3px 10px;
+            border-radius: 12px;
+            color: white;
+            font-size: 0.75em;
+            font-weight: bold;
+            text-transform: uppercase;
+            white-space: nowrap;
+        }
+
+        .badge.critical { background: var(--critical); }
+        .badge.high { background: var(--high); }
+        .badge.medium { background: var(--medium); color: #333; }
+        .badge.low { background: var(--low); }
+        .badge.info { background: var(--info); }
+        .badge.unknown { background: var(--unknown); }
+
+        code {
+            background: #f1f3f5;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 0.8em;
+            word-break: break-all;
+        }
+
+        details { margin-top: 5px; cursor: pointer; }
+
+        details pre {
+            background: #2d2d2d;
+            color: #f8f8f2;
+            padding: 10px;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-size: 0.75em;
+            max-height: 200px;
+        }
+
+        .warning {
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+            padding: 12px 15px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: #999;
+            font-size: 1.1em;
+        }
+
+        footer {
+            margin-top: 30px;
+            text-align: center;
+            color: #999;
+            font-size: 0.8em;
+            padding: 15px;
+            border-top: 1px solid #ddd;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+
+    <!-- Header -->
+    <div class="header">
+        <h1>🛡️ {{ title }}</h1>
+        <p class="meta">
+            Scan ID: <strong>{{ scan_id }}</strong> |
+            Generated: <strong>{{ generated_at }}</strong>
+        </p>
+    </div>
+
+    <!-- Summary Cards -->
+    <h2>📊 Summary</h2>
+    <div class="summary-grid">
+        <div class="summary-card">
+            <div class="number">{{ summary.total_tasks }}</div>
+            <div class="label">Total Tasks</div>
+        </div>
+        <div class="summary-card">
+            <div class="number">{{ summary.completed_tasks }}</div>
+            <div class="label">Completed</div>
+        </div>
+        <div class="summary-card">
+            <div class="number">{{ summary.failed_tasks }}</div>
+            <div class="label">Failed</div>
+        </div>
+        <div class="summary-card">
+            <div class="number">{{ total_findings }}</div>
+            <div class="label">Total Findings</div>
+        </div>
+        <div class="summary-card">
+            <div class="number">{{ summary.unique_endpoints }}</div>
+            <div class="label">Unique Endpoints</div>
+        </div>
+    </div>
+
+    <!-- Severity Breakdown -->
+    <h2>🔴 Severity Breakdown</h2>
+    {% set sev_colors = {
+        'critical': '#dc3545', 'high': '#fd7e14', 'medium': '#ffc107',
+        'low': '#28a745', 'info': '#17a2b8', 'unknown': '#6c757d'
+    } %}
+
+    {% if total_findings > 0 %}
+    <div class="severity-bar">
+        {% for sev in severity_order %}
+            {% set count = summary.severity_counts.get(sev, 0) %}
+            {% if count > 0 %}
+            <div class="segment" style="flex-grow: {{ count }}; background: {{ sev_colors.get(sev, '#6c757d') }};">
+                {{ sev|upper }}: {{ count }}
+            </div>
+            {% endif %}
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <table>
+        <thead>
+            <tr><th>Severity</th><th>Count</th></tr>
+        </thead>
+        <tbody>
+            {% for sev in severity_order %}
+            <tr>
+                <td><span class="badge {{ sev }}">{{ sev|upper }}</span></td>
+                <td>{{ summary.severity_counts.get(sev, 0) }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <!-- Findings -->
+    <h2>🔍 Detailed Findings</h2>
+    {% if truncated %}
+    <div class="warning">
+        ⚠ Showing {{ displayed_count }} of {{ total_findings }} findings.
+        Export the JSON report for the complete dataset.
+    </div>
+    {% endif %}
+
+    {% if findings %}
+    <table>
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>Severity</th>
+                <th>Template</th>
+                <th>Endpoint</th>
+                <th>Description</th>
+                <th>Remediation</th>
+                <th>cURL Command</th>
+                {% if include_raw %}<th>Raw Output</th>{% endif %}
+            </tr>
+        </thead>
+        <tbody>
+            {% for finding in findings %}
+            <tr>
+                <td>{{ loop.index }}</td>
+                <td>
+                    <span class="badge {{ finding.severity | severity_badge }}">
+                        {{ finding.severity | upper }}
+                    </span>
+                </td>
+                <td>{{ finding.template_name | default('N/A', true) }}</td>
+                <td>{{ finding.endpoint | default('N/A', true) }}</td>
+                <td>{{ finding.description | default('N/A', true) }}</td>
+                <td>{{ finding.remediation | default('N/A', true) }}</td>
+                <td><code>{{ finding.curl_command | default('N/A', true) }}</code></td>
+                {% if include_raw %}
+                <td>
+                    {% if finding.raw_output %}
+                    <details>
+                        <summary>Show</summary>
+                        <pre>{{ finding.raw_output }}</pre>
+                    </details>
+                    {% else %}
+                    <span style="color: #999;">—</span>
+                    {% endif %}
+                </td>
+                {% endif %}
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="empty-state">✅ No findings detected. Target appears clean.</p>
+    {% endif %}
+
+    <!-- Footer -->
+    <footer>
+        <p>Generated by <strong>Centaur-Jarvis Reporting Module</strong> v1.0.0 | {{ generated_at }}</p>
+    </footer>
+
+</div>
+</body>
+</html>

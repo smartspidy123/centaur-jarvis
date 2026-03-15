@@ -1,0 +1,252 @@
+---
+
+## 🔬 Deep Dive Post-Mortem (DNA)
+
+### ASCII Workflow Diagram
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ DIRBUST MODULE WORKFLOW │
+│ │
+│ ┌──────────┐ ┌───────────┐ ┌────────────────┐ ┌───────────────┐ │
+│ │ Redis Q │───▶│ Worker │───▶│ Wordlist Mgr │───▶│ Tool Runner │ │
+│ │ (BRPOP) │ │ Validate │ │ Resolve Path │ │ ffuf/gobuster │ │
+│ └──────────┘ └─────┬─────┘ └───────┬────────┘ └──────┬────────┘ │
+│ │ │ │ │
+│ │ ┌─────────────┘ │ │
+│ │ │ │ │
+│ ▼ ▼ │ │
+│ ┌──────────────┐ │ │
+│ │ Task Params │ │ │
+│ │ Resolution │ │ │
+│ │ (defaults + │ │ │
+│ │ overrides) │ │ │
+│ └──────┬───────┘ │ │
+│ │ │ │
+│ ▼ │ │
+│ ┌─────────────────┐ ┌──────────────────────┐ │ │
+│ │ SELECT TOOL │────▶│ ffuf_runner.py │──┘ │
+│ │ ffuf preferred │ │ • Build CLI command │ │
+│ │ gobuster fall- │ │ • Popen + stream │ │
+│ │ back │ │ • Parse JSON lines │ │
+│ └────────┬────────┘ │ • Return FfufResult │ │
+│ │ └──────────┬───────────┘ │
+│ │ (if ffuf │ │
+│ │ missing) │ │
+│ ▼ │ │
+│ ┌─────────────────┐ │ │
+│ │ gobuster_runner │ │ │
+│ │ • Build CLI │ │ │
+│ │ • Parse regex │ │ │
+│ │ • Return same │ │ │
+│ │ FfufResult │ │ │
+│ └────────┬────────┘ │ │
+│ │ │ │
+│ └──────────┬─────────────┘ │
+│ │ │
+│ ▼ │
+│ ┌──────────────────┐ │
+│ │ BUILD RESULT │ │
+│ │ • Mandatory │ │
+│ │ data field │ │
+│ │ • findings[] │ │
+│ │ • stats{} │ │
+│ └────────┬─────────┘ │
+│ │ │
+│ ▼ │
+│ ┌──────────────────┐ ┌────────────────────────┐ │
+│ │ PUSH TO REDIS │───▶│ results:incoming │ │
+│ │ + Set Status │ │ (consumed by │ │
+│ │ COMPLETED │ │ orchestrator) │ │
+│ └──────────────────┘ └────────────────────────┘ │
+│ │
+│ ON FAILURE: │
+│ • Status → FAILED (UPPERCASE) │
+│ • Result pushed with empty findings, error_type in data.stats │
+│ • Memory buffer if Redis is down (up to 100 results) │
+│ │
+│ ON SIGTERM: │
+│ • Finish current task (don't abandon mid-scan) │
+│ • Then exit cleanly │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+text
+
+
+### Wordlist Management Deep-Dive
+
+The `WordlistManager` implements a 4-tier resolution strategy:
+
+1. **Custom Path (from task)**: If the task payload includes a `wordlist` field, it's tried first. If the file exists, it's used immediately. If not found, a warning is logged and we fall through.
+
+2. **Default Path (from config)**: The `config.yaml` specifies a default path (e.g., `/usr/share/seclists/...`). If this file exists, it's used.
+
+3. **Cache Check**: A deterministic cache filename is derived from a SHA-256 hash of the download URL, stored under `~/.centaur/wordlists/`. If a previous download exists, it's reused.
+
+4. **Auto-Download**: As a last resort (if enabled), the wordlist is downloaded from the configured URL (default: SecLists on GitHub). The download uses **atomic write** (temp file + `shutil.move`) to prevent partial/corrupt files from being used.
+
+### Tool Fallback Strategy
+START
+│
+├── Is ffuf available? ──YES──▶ Run ffuf
+│ │
+│ ├── Success? ──YES──▶ Done
+│ │
+│ └── OSError? ──▶ Try gobuster
+│
+└── NO
+│
+├── Is gobuster available? ──YES──▶ Run gobuster
+│ │
+│ ├── Success? ──YES──▶ Done
+│ └── Fail? ──▶ FAILED (EXECUTION_ERROR)
+│
+└── NO ──▶ FAILED (TOOL_MISSING)
+
+text
+
+
+Tool availability is checked **at startup** using `shutil.which()` and a version command. If a tool disappears at runtime (e.g., uninstalled), the `ToolMissingError` is caught and the availability flag is updated dynamically.
+
+### Edge Cases Mitigated — Code References
+
+| #  | Edge Case                   | Mitigation                                                              | Code Location                                |
+|----|-----------------------------|-------------------------------------------------------------------------|----------------------------------------------|
+| 1  | Wordlist not found          | 4-tier resolution: custom→default→cache→download                        | `wordlist_manager.py:get_wordlist_path()`    |
+| 2  | ffuf missing                | Fallback to gobuster; if both missing → `TOOL_MISSING`                  | `worker.py:_process_task()` lines 5-6        |
+| 3  | Target unreachable          | ffuf/gobuster handle internally; worker captures nonzero return code     | `ffuf_runner.py:run_ffuf()` proc handling    |
+| 4  | Rate limit (429)            | `delay` param maps to ffuf `-p`; advisory `per_host_rate` in config     | `ffuf_runner.py` cmd building                |
+| 5  | Large wordlist              | Streaming stdout parse (line-by-line Popen); ffuf handles internally    | `ffuf_runner.py:run_ffuf()` stdout loop      |
+| 6  | Duplicate tasks             | Worker is stateless; dedup is orchestrator responsibility               | Architecture design                          |
+| 7  | Deep recursion              | Depth clamped to `max_recursion_depth` from config                      | `worker.py:_process_task()` depth clamping   |
+| 8  | Malformed ffuf JSON         | `json.JSONDecodeError` caught per line; line skipped, warning logged    | `ffuf_runner.py:run_ffuf()` parse loop       |
+| 9  | Redis connection lost       | In-memory buffer (up to 100 results); flush on reconnection             | `worker.py:RedisClient._flush_buffer()`      |
+| 10 | Invalid task JSON in queue  | `json.JSONDecodeError` caught in `pop_task()`; logged and skipped       | `worker.py:RedisClient.pop_task()`           |
+| 11 | Invalid task fields         | `validate_task()` checks all fields; returns list of error messages     | `worker.py:validate_task()`                  |
+| 12 | SIGTERM during scan         | Current task finishes; `_shutdown_requested` flag checked between tasks  | `worker.py:_handle_signal()`, `run()`        |
+| 13 | ffuf process timeout        | `proc.wait(timeout=remaining)` then `proc.kill()`                       | `ffuf_runner.py:run_ffuf()` timeout handling |
+| 14 | Partial wordlist download   | Atomic write: temp file → move; cleanup on failure                      | `wordlist_manager.py:_download_wordlist()`   |
+| 15 | Tool disappears at runtime  | `ToolMissingError` caught; availability flag updated dynamically        | `worker.py:_process_task()` tool execution   |
+| 16 | Missing `requests` library  | `WordlistError` raised with clear message                               | `wordlist_manager.py:_download_wordlist()`   |
+
+### Remaining Loopholes & Future Improvements
+
+| Category               | Issue                                                                 | Proposed Solution                                                  |
+|------------------------|-----------------------------------------------------------------------|--------------------------------------------------------------------|
+| **AI Integration**     | Wordlist selection is static                                          | Use AI Router to select wordlists based on target tech stack       |
+| **Distributed Fuzzing**| Single-worker bottleneck for large targets                            | Shard wordlists across multiple workers; coordinate via Redis      |
+| **Smart Filtering**    | ffuf `-fc 404` is hardcoded; may miss custom 404 pages                | Auto-calibrate: send known-bad path, fingerprint the 404 response  |
+| **WAF Detection**      | No WAF evasion or detection                                           | Add pre-scan WAF probe; adjust headers/delay accordingly           |
+| **Rate Limiting**      | `per_host_rate` is advisory only; not enforced in code                | Implement token-bucket rate limiter shared across workers           |
+| **Authentication**     | No support for authenticated scans                                    | Add `headers` and `cookies` fields to task payload                 |
+| **Virtual Hosts**      | No Host header fuzzing support                                        | Add vhost mode using ffuf's `-H "Host: FUZZ.example.com"`         |
+| **Result Dedup**       | Same URL may be found via different extension paths                   | Post-process dedup by URL in result building                       |
+| **Metrics/Telemetry**  | No Prometheus/StatsD metrics exported                                 | Add counters for tasks_processed, findings_total, errors_total     |
+| **Persistence**        | In-memory buffer is lost if worker crashes                            | Write buffer to disk (SQLite/file) for crash recovery              |
+
+### Performance Considerations
+
+| Factor                | Impact                                                                 | Recommendation                                                     |
+|-----------------------|------------------------------------------------------------------------|--------------------------------------------------------------------|
+| **Wordlist Size**     | common.txt ≈ 4,600 words; directory-list-2.3-medium ≈ 220K words     | For large lists, use ffuf (Go, compiled) over gobuster             |
+| **Thread Count**      | Higher threads = more parallel requests but higher CPU/network load   | Default 40; reduce to 10-20 for sensitive targets                  |
+| **Extensions**        | Each extension multiplies wordlist size (8 ext × 4600 = 36,800 reqs) | Be selective; use tech-detection to choose relevant extensions     |
+| **Recursion**         | Exponential growth with depth; depth=3 can be very slow               | Limit depth; consider breadth-first with priority queue            |
+| **Delay**             | 0.1s delay × 36,800 reqs = ~1 hour for a single target               | Balance stealth vs speed based on engagement rules                 |
+| **Memory**            | ffuf JSON output is streamed line-by-line; low memory footprint       | No concern for typical scans; massive outputs (>100K findings) rare|
+| **Network I/O**       | Bottleneck shifts from CPU to network at high thread counts           | Monitor target response times; back off if latency spikes          |
+
+### Integration Notes
+
+#### How the Orchestrator Should Push Tasks
+
+```python
+import json
+import redis
+
+r = redis.Redis(host="127.0.0.1", port=6379, db=0)
+
+task = {
+    "task_id": "dirbust-001",
+    "target": "https://example.com",
+    "extensions": ["php", "asp", "txt"],
+    "threads": 20,
+    "delay": 0.1,
+    "recursive": True,
+    "depth": 2,
+}
+
+# Push to queue
+r.lpush("queue:dirbust", json.dumps(task))
+
+# Optionally set initial status
+r.hset("task:dirbust-001", mapping={
+    "status": "QUEUED",
+    "module": "dirbust",
+})
+Expected Result Structure (for downstream consumers)
+The result on results:incoming is always a JSON object with:
+
+text
+
+{
+  "task_id":         str,    # echoed from input
+  "module":          "dirbust",
+  "status":          "COMPLETED" | "FAILED",   # UPPERCASE
+  "target":          str,
+  "timestamp":       str,    # ISO-8601 UTC
+  "elapsed_seconds": float,
+
+  "data": {                  # ← MANDATORY FIELD
+    "findings": [            # list of discovered paths
+      {
+        "url":              str,
+        "status_code":      int,
+        "content_length":   int,
+        "content_type":     str,
+        "redirect_location": str,
+        "input_word":       str,
+        "lines":            int,
+        "words":            int,
+        "duration_ms":      float,
+        "host":             str,
+      }
+    ],
+    "stats": {
+      "total_requests":   int,
+      "total_findings":   int,
+      "errors":           int,
+      "elapsed_seconds":  float,
+      "tool":             str,
+      "wordlist":         str,
+      "extensions":       list,
+      "threads":          int,
+      "recursive":        bool,
+    }
+  },
+
+  // On FAILED status, these additional fields appear:
+  "error_type":    str,     # e.g., "TOOL_MISSING", "VALIDATION_ERROR"
+  "error_message": str,
+}
+Chaining with Other Modules
+The dirbust module is designed to run after host discovery:
+
+text
+
+[recon:httpx] → discovers live hosts → pushes targets to queue:dirbust
+                                        ↓
+                                   [dirbust worker]
+                                        ↓
+                                   results:incoming → [orchestrator aggregates]
+The orchestrator can automatically generate dirbust tasks from httpx results:
+
+Python
+
+# In orchestrator, after httpx result arrives:
+for host in httpx_result["data"]["live_hosts"]:
+    dirbust_task = {
+        "task_id": f"dirbust-{uuid.uuid4().hex[:8]}",
+        "target": host["url"],
+        "extensions": ["php", "asp"],
+        "threads": 20,
+    }
+    r.lpush("queue:dirbust", json.dumps(dirbust_task))

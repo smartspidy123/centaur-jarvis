@@ -1,0 +1,175 @@
+{
+  "scan_id": "SCAN_219949EE",
+  "saved_at": "2026-03-15T05:35:07.458867+00:00",
+  "version": "1.0",
+  "state": {
+    "scan_id": "SCAN_219949EE",
+    "targets": [
+      "https://demo.testfire.net"
+    ],
+    "profile_name": "full",
+    "current_phase": "discovery",
+    "status": "PAUSED",
+    "stats": {
+      "tasks_pushed": 3,
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "findings_count": 0,
+      "ai_calls": 0,
+      "rag_snippets": 0
+    },
+    "tool_summaries": {
+      "ports_open": [],
+      "subdomains": 0,
+      "endpoints": 0,
+      "payloads_sent": 0,
+      "interesting_responses": 0,
+      "templates_matched": 0,
+      "critical_findings": 0,
+      "technologies": []
+    },
+    "completed_tasks": {},
+    "pending_tasks": {
+      "SCAN_219949EE_subfinder_d9464d": {
+        "task_id": "SCAN_219949EE_subfinder_d9464d",
+        "scan_id": "SCAN_219949EE",
+        "phase": "discovery",
+        "tool": "subfinder",
+        "target": "https://demo.testfire.net",
+        "params": {
+          "recursive": true,
+          "threads": 10
+        },
+        "status": "PENDING",
+        "created_at": "2026-03-15T05:29:57.219557+00:00"
+      },
+      "SCAN_219949EE_httpx_f2438b": {
+        "task_id": "SCAN_219949EE_httpx_f2438b",
+        "scan_id": "SCAN_219949EE",
+        "phase": "discovery",
+        "tool": "httpx",
+        "target": "https://demo.testfire.net",
+        "params": {
+          "ports": "80,443,8080",
+          "status_code": true
+        },
+        "status": "PENDING",
+        "created_at": "2026-03-15T05:29:57.222939+00:00"
+      },
+      "SCAN_219949EE_naabu_0a1692": {
+        "task_id": "SCAN_219949EE_naabu_0a1692",
+        "scan_id": "SCAN_219949EE",
+        "phase": "discovery",
+        "tool": "naabu",
+        "target": "https://demo.testfire.net",
+        "params": {
+          "ports": "top-1000",
+          "rate": 100
+        },
+        "status": "PENDING",
+        "created_at": "2026-03-15T05:29:57.223446+00:00"
+      }
+    },
+    "events": [
+      {
+        "timestamp": "05:29:57",
+        "type": "info",
+        "message": "Connected to Redis (127.0.0.1:6379)"
+      },
+      {
+        "timestamp": "05:29:57",
+        "type": "info",
+        "message": "Scan SCAN_219949EE initialized | Profile: full | Targets: 1"
+      },
+      {
+        "timestamp": "05:29:57",
+        "type": "info",
+        "message": "Starting phased scan: discovery \u2192 enumeration"
+      },
+      {
+        "timestamp": "05:29:57",
+        "type": "phase",
+        "message": "\u2501\u2501\u2501 Phase: DISCOVERY \u2501\u2501\u2501"
+      },
+      {
+        "timestamp": "05:29:57",
+        "type": "info",
+        "message": "Phase 'discovery' would run 3 tasks: ['subfinder', 'httpx', 'naabu']"
+      }
+    ],
+    "errors": [
+      {
+        "timestamp": "05:30:27",
+        "message": "Worker 'orchestrator' crashed (exit code: 1)"
+      },
+      {
+        "timestamp": "05:30:28",
+        "message": "Worker 'fuzzer_worker' crashed (exit code: 1)"
+      },
+      {
+        "timestamp": "05:30:59",
+        "message": "Worker 'orchestrator' crashed (exit code: 1)"
+      },
+      {
+        "timestamp": "05:31:00",
+        "message": "Worker 'fuzzer_worker' crashed (exit code: 1)"
+      },
+      {
+        "timestamp": "05:31:31",
+        "message": "Worker 'orchestrator' crashed (exit code: 1)"
+      },
+      {
+        "timestamp": "05:31:32",
+        "message": "Worker 'fuzzer_worker' crashed (exit code: 1)"
+      },
+      {
+        "timestamp": "05:32:03",
+        "message": "Worker 'orchestrator' crashed (exit code: 1)"
+      },
+      {
+        "timestamp": "05:32:04",
+        "message": "Worker 'fuzzer_worker' crashed (exit code: 1)"
+      },
+      {
+        "timestamp": "05:32:35",
+        "message": "Worker 'orchestrator' crashed (exit code: 1)"
+      },
+      {
+        "timestamp": "05:32:36",
+        "message": "Worker 'fuzzer_worker' crashed (exit code: 1)"
+      },
+      {
+        "timestamp": "05:33:07",
+        "message": "Worker 'orchestrator' crashed (exit code: 1)"
+      },
+      {
+        "timestamp": "05:33:08",
+        "message": "Worker 'fuzzer_worker' crashed (exit code: 1)"
+      },
+      {
+        "timestamp": "05:33:39",
+        "message": "Worker 'orchestrator' crashed (exit code: 1)"
+      },
+      {
+        "timestamp": "05:33:40",
+        "message": "Worker 'fuzzer_worker' crashed (exit code: 1)"
+      },
+      {
+        "timestamp": "05:34:11",
+        "message": "Worker 'orchestrator' crashed (exit code: 1)"
+      },
+      {
+        "timestamp": "05:34:12",
+        "message": "Worker 'fuzzer_worker' crashed (exit code: 1)"
+      },
+      {
+        "timestamp": "05:34:43",
+        "message": "Worker 'orchestrator' crashed (exit code: 1)"
+      },
+      {
+        "timestamp": "05:34:44",
+        "message": "Worker 'fuzzer_worker' crashed (exit code: 1)"
+      }
+    ]
+  }
+}

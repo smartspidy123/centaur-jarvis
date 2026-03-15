@@ -1,0 +1,22 @@
+# RAG Module Configuration
+zilliz:
+  endpoint: ""  # Will be filled from env ZILLIZ_ENDPOINT
+  token: ""     # Will be filled from env ZILLIZ_TOKEN
+  collection_name: "security_knowledge_base"
+
+embedding:
+  dimension: 384
+  model: "sentence-transformers/all-MiniLM-L6-v2"
+
+index:
+  metric_type: "COSINE"
+  index_type: "AUTOINDEX"
+
+knowledge_base:
+  sources:
+    hacktricks: "data/hacktricks.jsonl"
+    portswigger: "data/portswigger.jsonl"
+    payloads: "data/payloads.jsonl"
+  
+  chunk_size: 500
+  chunk_overlap: 50

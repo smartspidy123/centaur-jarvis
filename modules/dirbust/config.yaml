@@ -1,0 +1,55 @@
+# ─────────────────────────────────────────────────────────────
+# Centaur-Jarvis  ·  Directory Bruteforcer  ·  Default Config
+# ─────────────────────────────────────────────────────────────
+
+wordlist:
+  default: "/usr/share/seclists/Discovery/Web-Content/common.txt"
+  auto_download: true
+  download_url: "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt"
+  cache_dir: "~/.centaur/wordlists"        # expanded at runtime
+
+tools:
+  ffuf:
+    path: "ffuf"                             # binary name or full path
+  gobuster:
+    path: "gobuster"                         # fallback binary
+
+execution:
+  default_threads: 40
+  default_delay: 0.1                         # seconds between requests
+  default_extensions:
+    - "php"
+    - "asp"
+    - "aspx"
+    - "jsp"
+    - "txt"
+    - "bak"
+    - "old"
+    - "inc"
+  max_recursion_depth: 3
+  timeout: 300                               # per-task timeout in seconds
+  max_retries: 2                             # retries on transient failures
+
+rate_limit:
+  per_host_rate: 10                          # requests/sec (advisory)
+  burst: 20
+
+redis:
+  task_queue: "queue:dirbust"
+  result_queue: "results:incoming"
+  status_prefix: "task:"                     # hash key = task:{id}
+  connection:
+    host: "127.0.0.1"
+    port: 6379
+    db: 0
+    socket_timeout: 5
+    retry_on_timeout: true
+
+logging:
+  level: "INFO"
+  json_format: true
+
+worker:
+  poll_interval: 1.0                         # seconds between queue polls
+  memory_buffer_max: 100                     # max results buffered on Redis loss
+  graceful_shutdown_timeout: 30              # seconds to wait for current task

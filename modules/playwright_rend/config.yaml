@@ -1,0 +1,42 @@
+# ──────────────────────────────────────────────
+# Playwright Renderer – default configuration
+# ──────────────────────────────────────────────
+
+redis:
+  task_queue: "queue:playwright"
+  result_queue: "results:incoming"
+  status_prefix: "task:status:"
+  host: "127.0.0.1"
+  port: 6379
+  db: 0
+  socket_timeout: 5
+  retry_interval: 5        # seconds between reconnect attempts
+  max_buffer: 100           # max results buffered when Redis is down
+
+browser:
+  headless: true
+  timeout: 30000            # navigation timeout in milliseconds
+  viewport:
+    width: 1280
+    height: 800
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+  launch_args:
+    - "--disable-dev-shm-usage"
+    - "--no-sandbox"
+    - "--disable-gpu"
+    - "--disable-extensions"
+    - "--disable-background-networking"
+  extra_http_headers: {}
+
+extraction:
+  intercept_xhr: true
+  intercept_fetch: true
+  extract_forms: true
+  max_response_body: 10240   # bytes – truncate response bodies beyond this
+  max_requests: 500          # stop capturing after this many XHR/Fetch requests
+  depth: 1                   # recursion depth for element clicking
+  max_redirects: 10          # cap on redirect hops before aborting
+
+worker:
+  poll_interval: 1           # seconds to BRPOP timeout
+  subprocess_extra_timeout: 15  # seconds added to task timeout for subprocess kill

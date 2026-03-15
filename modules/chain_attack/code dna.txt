@@ -1,0 +1,259 @@
+---
+
+## 📊 Deep Dive Post-Mortem (DNA)
+
+### 1. ASCII Workflow Diagram
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ CHAIN ATTACK MODULE WORKFLOW │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ │
+│ OTHER MODULES (recon, fuzzer, nuclei, etc.) │
+│ │ │
+│ │ Push results to results:incoming │
+│ ▼ │
+│ ┌──────────────────┐ │
+│ │ GraphListener │ Standalone daemon, BRPOP on results:incoming │
+│ │ (Thread/Process) │ │
+│ └────────┬─────────┘ │
+│ │ │
+│ │ ingest_findings() │
+│ ▼ │
+│ ┌──────────────────────────────────────────────────┐ │
+│ │ KNOWLEDGE GRAPH │ │
+│ │ │ │
+│ │ ┌─────┐ has_credential ┌──────────┐ │ │
+│ │ │ URL ├─────────────────────► CREDENTIAL│ │ │
+│ │ └──┬──┘ └──────────┘ │ │
+│ │ │ vulnerable_to │ │
+│ │ ▼ │ │
+│ │ ┌──────────────┐ leads_to ┌─────────┐ │ │
+│ │ │VULNERABILITY ├─────────────► SESSION │ │ │
+│ │ └──────────────┘ └─────────┘ │ │
+│ │ │ │
+│ │ Storage: Redis (hashes/sets) or In-Memory │ │
+│ │ Path-finding: NetworkX DiGraph mirror │ │
+│ └───────────────────────┬──────────────────────────┘ │
+│ │ │
+│ │ summary() → graph state JSON │
+│ ▼ │
+│ ┌──────────────────────────────────────────────────┐ │
+│ │ AI PLANNER │ │
+│ │ │ │
+│ │ 1. Receive graph summary │ │
+│ │ 2. Build prompt (system + user) │ │
+│ │ 3. Call AI Router (TaskComplexity.HIGH) │ │
+│ │ 4. Parse JSON response → AttackPlan │ │
+│ │ 5. Validate (cycle check, step cap) │ │
+│ │ 6. Store in Redis (chain:plan:{id}) │ │
+│ │ │ │
+│ │ FALLBACK: Static templates │ │
+│ │ • "default" → recon + fuzz + nuclei │ │
+│ │ • "credential_found" → login + escalate │ │
+│ │ • "sqli_found" → exploit + dump │ │
+│ │ • "xss_found" → steal session + impersonate │ │
+│ └───────────────────────┬──────────────────────────┘ │
+│ │ │
+│ │ Push to chain:plans queue │
+│ ▼ │
+│ ┌──────────────────────────────────────────────────┐ │
+│ │ HUMAN APPROVAL GATE (if enabled) │ │
+│ │ │ │
+│ │ auto_approve=true → Plan goes directly │ │
+│ │ auto_approve=false → Plan stays AWAITING_APPROVAL│ │
+│ │ until approve_plan() called │ │
+│ └───────────────────────┬──────────────────────────┘ │
+│ │ │
+│ ▼ │
+│ ┌──────────────────────────────────────────────────┐ │
+│ │ EXECUTOR │ │
+│ │ │ │
+│ │ For each step in plan (in order): │ │
+│ │ ├─ Check dependencies (depends_on) │ │
+│ │ ├─ DIRECT actions (login, fetch_url, custom): │ │
+│ │ │ Execute via HTTP client │ │
+│ │ │ Store result, update graph │ │
+│ │ └─ QUEUED actions (recon, fuzz, nuclei, etc.): │ │
+│ │ Dispatch task to module queue │ │
+│ │ Wait for result (polling with timeout) │ │
+│ │ Ingest findings into graph │ │
+│ │ │ │
+│ │ On failure: retry → replan → abort │ │
+│ │ On completion: push result to results:incoming │ │
+│ └───────────────────────┬──────────────────────────┘ │
+│ │ │
+│ ▼ │
+│ ┌──────────────────────────────────────────────────┐ │
+│ │ RESULT (pushed to results:incoming) │ │
+│ │ { │ │
+│ │ "task_id": "chain_plan_xxx", │ │
+│ │ "module": "chain_attack", │ │
+│ │ "status": "COMPLETED", ← UPPERCASE │ │
+│ │ "data": { ← MANDATORY │ │
+│ │ "plan_id": "...", │ │
+│ │ "steps_attempted": 5, │ │
+│ │ "steps_succeeded": 4, │ │
+│ │ "findings": [...], │ │
+│ │ "final_state": {...} │ │
+│ │ } │ │
+│ │ } │ │
+│ └──────────────────────────────────────────────────┘ │
+│ │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+text
+
+
+### 2. Graph Schema & AI Prompt Design
+
+#### Graph Schema
+
+The knowledge graph uses a **property graph model** with typed nodes and labeled edges:
+
+NODE TYPES:
+┌────────────────┬──────────────────────────────────────────────────────┐
+│ Type │ Key Attributes │
+├────────────────┼──────────────────────────────────────────────────────┤
+│ URL │ url, status_code, content_length │
+│ CREDENTIAL │ username, password, target │
+│ SESSION │ token, cookies, target, username │
+│ PARAMETER │ name, url, type (query/body/header) │
+│ VULNERABILITY │ vuln_type, severity, cve, url, payload, details │
+│ FILE │ path, host, content_type │
+│ PORT │ port, host, service, protocol │
+│ HOST │ hostname, ip, os │
+│ ENDPOINT │ url, method, response_code │
+│ TECHNOLOGY │ name, version │
+│ USER │ username, role, target │
+│ DATABASE │ name, host, type (mysql/postgres/etc.) │
+│ API_KEY │ key, service, scope │
+└────────────────┴──────────────────────────────────────────────────────┘
+
+EDGE TYPES (RELATIONS):
+┌─────────────────────┬──────────────────────────────────────────────────┐
+│ Relation │ Meaning │
+├─────────────────────┼──────────────────────────────────────────────────┤
+│ has_credential │ URL/Endpoint has associated credentials │
+│ accessible_from │ Resource is accessible from another │
+│ vulnerable_to │ URL/Endpoint is vulnerable to a specific vuln │
+│ leads_to │ Exploiting one finding leads to another asset │
+│ runs_on │ Service/App runs on a host/port │
+│ exposes │ Port/Host exposes a service/endpoint │
+│ authenticates │ Credential authenticates to a session │
+│ contains │ Database/File contains sensitive data │
+│ discovered_via │ Node was discovered through another node │
+│ related_to │ Generic relationship │
+└─────────────────────┴──────────────────────────────────────────────────┘
+
+text
+
+
+**Deduplication**: Each node has a `fingerprint()` method that generates a deterministic key from its type + key attributes. Before inserting, the graph checks if a node with the same fingerprint exists and merges attributes if so.
+
+**Storage in Redis**:
+- Nodes: `chain:graph:node:{id}` → Redis Hash
+- Edges: `chain:graph:edge:{from|relation|to}` → Redis Hash
+- Node index: `chain:graph:node_ids` → Redis Set
+- Edge index per node: `chain:graph:node:{id}:edges` → Redis Set
+- Fingerprints: `chain:graph:fingerprints` → Redis Hash (fp → node_id)
+
+#### AI Prompt Design
+
+The prompt follows a **two-part structure**:
+
+1. **System Prompt**: Establishes the AI as a senior pentester, defines the JSON response format, lists valid actions, and sets constraints (max steps, no repeats).
+
+2. **User Prompt**: Provides the current goal, a JSON dump of the graph summary (nodes + edges + type counts), and any previous plan summaries (so the AI avoids repeating failed approaches).
+
+**Key design decisions**:
+- Graph summary is **capped at 8KB** to stay within context limits
+- Sensitive attributes (passwords, tokens) are **redacted** from the summary sent to AI
+- The response is **strictly JSON** — markdown code blocks are stripped during parsing
+- If the AI returns an unrecognized action, it's mapped to `CUSTOM`
+- Plans from AI are **validated for cycles** before acceptance
+
+### 3. Edge Cases Mitigated
+
+| #  | Edge Case                              | Mitigation Strategy                                            | Code Location                |
+|----|----------------------------------------|----------------------------------------------------------------|------------------------------|
+| 1  | Graph data too large for Redis         | TTL-based expiry (7 days default); `maxmemory` policy honored; queries paginated via `max_nodes`/`max_edges` params | `knowledge_graph.py` TTL, `summary()` limits |
+| 2  | AI returns malformed JSON              | JSON extraction with markdown-stripping; up to 3 attempts; fallback to static templates | `ai_planner.py` `_parse_ai_response()`, `_generate_static_plan()` |
+| 3  | Plan step fails (wrong creds, etc.)    | Step marked `FAILED`; retry up to `max_retries`; executor can call `replan()` | `executor.py` `_execute_plan()`, `replan()` |
+| 4  | Circular dependencies in plan          | `AttackPlan.has_cycle()` DFS check; dependencies stripped if cycle detected | `models.py` `has_cycle()`, `ai_planner.py` |
+| 5  | Multiple concurrent plans              | Plan IDs are UUIDs; step tracking keyed by task_id; `_active_plans` dict with locking | `executor.py` `_lock`, `_active_plans` |
+| 6  | Human approval timeout                 | Plan stays in `AWAITING_APPROVAL` indefinitely; no expiry timer (explicit approval required) | `ai_planner.py` `approve_plan()` |
+| 7  | Redis connection lost                  | In-memory fallback for graph; warning logs; `socket_connect_timeout` and `retry_on_timeout` | `knowledge_graph.py` constructor, all `_persist_*` methods |
+| 8  | AI Router unavailable                  | `HAS_AI_ROUTER` flag; static template fallback with context-aware template selection | `ai_planner.py` `_generate_static_plan()` |
+| 9  | Step requires human interaction        | `HUMAN_INTERVENTION_REQUIRED` status; custom actions flagged | `executor.py` `_action_custom()` |
+| 10 | HTTP client library missing            | Graceful check; `_http_session = None`; direct actions fail with descriptive error | `executor.py` constructor |
+| 11 | Node type/relation validation          | Enum-based validation in `__post_init__`; raises `ValueError` on invalid types | `models.py` `GraphNode`, `GraphEdge` |
+| 12 | Step timeout                           | Configurable `step_timeout` (default 300s); `TIMEOUT` status | `executor.py` `_wait_for_step_result()` |
+| 13 | Result watcher thread crash            | Daemon thread; exception-caught loop with 2s backoff | `executor.py` `_watch_results()` |
+| 14 | Shared schemas unavailable             | Local `TaskStatus` stub class with uppercase constants | All files (import fallback) |
+| 15 | Config file missing                    | Default values hardcoded; config loading wrapped in try/except | All files (config loading) |
+
+### 4. Remaining Loopholes & Future Improvements
+
+| Priority | Item                                    | Description                                                                                               |
+|----------|-----------------------------------------|-----------------------------------------------------------------------------------------------------------|
+| HIGH     | Neo4j integration                       | Replace Redis graph storage with Neo4j for production. Cypher queries enable complex path-finding that Redis sets cannot efficiently support. |
+| HIGH     | Distributed locking (Redlock)           | Current locking is thread-level (`threading.RLock`). For multi-process deployments, use Redis-based distributed locks (e.g., `redlock-py`). |
+| HIGH     | Rate limiting                           | The executor dispatches tasks without rate limits. Add configurable delays between steps to avoid detection/banning. |
+| MEDIUM   | Reinforcement learning for planning     | Replace static templates with RL-based planning that learns from past successful chains across engagements. |
+| MEDIUM   | Plan versioning                         | Track plan versions when replanning. Currently, replans create new plan IDs with no lineage tracking.     |
+| MEDIUM   | Webhook notifications                   | When `HUMAN_INTERVENTION_REQUIRED` steps are encountered, notify via webhook (Slack, Teams, etc.).         |
+| MEDIUM   | Graph visualization API                 | Expose a REST endpoint that returns graph data in a format consumable by D3.js or Cytoscape.js.           |
+| LOW      | Step parallelism                        | Currently steps execute sequentially. Steps with no dependencies on each other could run in parallel.      |
+| LOW      | Credential rotation detection           | Detect when a session token expires and auto-refresh using stored credentials.                             |
+| LOW      | CAPTCHA handling integration            | Integrate with CAPTCHA-solving services for steps that encounter CAPTCHAs.                                |
+| LOW      | Graph pruning                           | Active pruning of low-confidence or stale nodes beyond TTL (e.g., ephemeral session tokens).              |
+
+### 5. Performance Considerations
+
+| Aspect                  | Consideration                                                                                          |
+|-------------------------|--------------------------------------------------------------------------------------------------------|
+| **Redis Memory**        | Each node is a Redis hash (~200-500 bytes). At 10,000 nodes, expect ~5MB. TTL ensures cleanup.         |
+| **NetworkX Mirror**     | In-memory DiGraph duplicates graph. For >100K nodes, consider disabling NX mirror or using external DB. |
+| **AI Router Latency**   | Each plan generation involves an LLM call (~2-15s depending on model). Rate-limit calls.               |
+| **Graph Summary Size**  | Summary is capped at 80 nodes / 150 edges (~8KB JSON). Larger graphs are truncated.                    |
+| **Step Timeout Polling** | Executor polls every 2s for step results. For high-throughput, consider Redis Pub/Sub instead.         |
+| **Fingerprint Lookups** | O(1) via Redis hash or dict. Deduplication adds minimal overhead.                                      |
+| **Concurrent Plans**    | Each plan executes sequentially within the executor. Multiple executor instances can run different plans.|
+| **Thread Safety**       | All graph mutations are protected by `RLock`. The executor uses a separate `Lock` for active plans.    |
+
+### 6. Integration Notes
+
+**How other modules feed into the graph:**
+
+┌─────────────────────────────────────────────────────────────┐
+│ MODULE INTEGRATION MAP │
+├─────────────────────┬───────────────────────────────────────┤
+│ Module │ What it feeds to the graph │
+├─────────────────────┼───────────────────────────────────────┤
+│ Recon │ URLs, endpoints, technologies, ports, │
+│ │ hosts, subdomains │
+├─────────────────────┼───────────────────────────────────────┤
+│ Smart Fuzzer │ Parameters, vulnerabilities (XSS, │
+│ │ SQLi, etc.), payloads │
+├─────────────────────┼───────────────────────────────────────┤
+│ Nuclei Sniper │ CVEs, vulnerability details, │
+│ │ confirmed exploits │
+├─────────────────────┼───────────────────────────────────────┤
+│ Brute Forcer │ Credentials (username/password pairs) │
+├─────────────────────┼───────────────────────────────────────┤
+│ Auth Analyzer │ Sessions, tokens, auth bypass vulns │
+├─────────────────────┼───────────────────────────────────────┤
+│ Report Generator │ (Consumer only — reads graph summary) │
+└─────────────────────┴───────────────────────────────────────┘
+
+text
+
+
+**Integration requires zero changes to existing modules.** The `GraphListener` daemon monitors `results:incoming` (the same queue all modules already push results to) and automatically parses findings into graph nodes. The executor dispatches tasks to existing module queues (`queue:recon`, `queue:smart_fuzzer`, etc.) using the standard task payload format.
+
+**To fully close the loop**, other modules should route chain-specific results to `chain:results` queue (in addition to `results:incoming`) so the executor's result watcher can match them. This can be done by adding a simple check in each module's result-push logic:
+
+```python
+# In any module's result push:
+if task_payload.get("metadata", {}).get("chain_plan_id"):
+    redis.lpush("chain:results", json.dumps(result))

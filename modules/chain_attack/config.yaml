@@ -1,0 +1,29 @@
+# Chain Attack Module Configuration
+# ==================================
+# Centaur-Jarvis VAPT Agent
+
+redis:
+  graph_prefix: "chain:graph"        # Key prefix for knowledge graph data
+  plan_queue: "chain:plans"          # Queue for plans awaiting execution
+  step_queue: "chain:steps"          # Queue for individual step tracking
+  result_queue: "results:incoming"   # Shared result queue for the system
+
+graph:
+  storage: "redis"                   # "redis" or "memory"
+  ttl: 604800                        # 7 days — graph node/edge TTL in seconds
+
+ai:
+  enabled: true                      # Use AI Router for plan generation
+  complexity: "HIGH"                 # TaskComplexity for AI Router calls
+  max_retries: 2                     # Retries on AI generation failure
+  temperature: 0.5                   # AI creativity level (lower = more deterministic)
+
+executor:
+  auto_approve: false                # Require human confirmation for plans
+  max_steps_per_plan: 10             # Maximum steps in a single plan
+  step_timeout: 300                  # Seconds to wait for a step result
+
+telemetry:
+  enabled: true
+  metrics_prefix: "centaur.chain_attack"
+  log_level: "INFO"

@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.log
+dump.rdb
+.env
+config/secrets.yaml
+=2.4.0

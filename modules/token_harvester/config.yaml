@@ -1,0 +1,79 @@
+# =============================================================================
+# Token Harvester — Module Configuration
+# =============================================================================
+# This file contains default settings for the Token Harvester module.
+# Values can be overridden by:
+#   1. config/modules.yaml (under "token_harvester" section)
+#   2. Environment variables (JARVIS_REDIS_HOST, etc.)
+# =============================================================================
+
+# Redis connection settings
+redis:
+  host: "127.0.0.1"
+  port: 6379
+  db: 0
+  # password: null  # Uncomment and set if Redis requires auth
+
+# Maximum number of tokens to buffer in memory when Redis is unavailable
+memory_buffer_max: 5000
+
+# Background cleanup interval (seconds) for expired tokens
+cleanup_interval: 300
+
+# Default TTL (seconds) for tokens without explicit expiry (7 days)
+default_ttl: 604800
+
+# Domains to ignore (tokens from these domains will not be harvested)
+# Example: static asset CDNs, analytics, etc.
+ignored_domains:
+  - "fonts.googleapis.com"
+  - "fonts.gstatic.com"
+  - "cdn.jsdelivr.net"
+  - "cdnjs.cloudflare.com"
+  - "www.google-analytics.com"
+  - "www.googletagmanager.com"
+  - "connect.facebook.net"
+  - "platform.twitter.com"
+
+# JSON response keys to search for tokens
+token_json_keys:
+  - "access_token"
+  - "accessToken"
+  - "token"
+  - "id_token"
+  - "idToken"
+  - "refresh_token"
+  - "refreshToken"
+  - "auth_token"
+  - "authToken"
+  - "jwt"
+  - "session_token"
+  - "sessionToken"
+  - "api_key"
+  - "apiKey"
+  - "api_token"
+  - "apiToken"
+  - "x-auth-token"
+  - "bearer"
+  - "csrf_token"
+  - "csrfToken"
+  - "xsrf_token"
+  - "xsrfToken"
+
+# Enable/disable response body token extraction
+extract_from_response_body: true
+
+# Maximum response body size to scan (bytes) — skip larger responses
+max_response_body_size: 1048576  # 1 MB
+
+# SECURITY: Whether to log actual token values (should be false in production)
+log_token_values: false
+
+# Regex patterns for extracting tokens from HTML/non-JSON response bodies
+body_token_patterns:
+  # CSRF hidden input fields
+  - '<input[^>]+name=["\'](?:csrf|_csrf|csrfmiddlewaretoken|__RequestVerificationToken|_token|authenticity_token)["\'][^>]+value=["\']([^"\']+)["\']'
+  - '<input[^>]+value=["\']([^"\']+)["\'][^>]+name=["\'](?:csrf|_csrf|csrfmiddlewaretoken|__RequestVerificationToken|_token|authenticity_token)["\']'
+  # Meta tags with CSRF token
+  - '<meta[^>]+name=["\']csrf-token["\'][^>]+content=["\']([^"\']+)["\']'
+  - '<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']csrf-token["\']'

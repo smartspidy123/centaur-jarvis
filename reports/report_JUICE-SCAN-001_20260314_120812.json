@@ -1,0 +1,59 @@
+{
+  "findings": [
+    {
+      "curl_command": "curl -X 'GET' -d '' -H 'Accept: text/html, application/json' -H 'Accept-Language: en' -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.8 Safari/605.1.15' 'http://localhost:42000/api-docs/swagger.json'",
+      "description": "Public Swagger API was detected.\n",
+      "endpoint": "localhost",
+      "extracted_results": [],
+      "matcher_name": "",
+      "raw_output": "",
+      "remediation": "N/A",
+      "severity": "info",
+      "target": "N/A",
+      "task_id": "juice-007",
+      "task_type": "unknown",
+      "template_name": "Public Swagger API - Detect",
+      "timestamp": "2026-03-14T17:04:21.291187768+05:30"
+    }
+  ],
+  "generated_at": "2026-03-14T12:08:12Z",
+  "generator": "centaur-jarvis-reporting",
+  "metadata": {
+    "generator": "centaur-jarvis-reporting",
+    "version": "1.0.0"
+  },
+  "report_version": "1.0.0",
+  "scan_id": "JUICE-SCAN-001",
+  "summary": {
+    "completed_tasks": 0,
+    "endpoints": [
+      "localhost"
+    ],
+    "failed_tasks": 0,
+    "severity_counts": {
+      "critical": 0,
+      "high": 0,
+      "info": 1,
+      "low": 0,
+      "medium": 0,
+      "unknown": 0
+    },
+    "total_findings": 1,
+    "total_tasks": 1,
+    "unique_endpoints": 1
+  },
+  "tasks": [
+    {
+      "completed_at": "2026-03-14T11:35:16.464371",
+      "exit_code": null,
+      "scan_id": "JUICE-SCAN-001",
+      "started_at": "",
+      "state": "unknown",
+      "stderr": "",
+      "stdout": "",
+      "target": "N/A",
+      "task_id": "juice-007",
+      "type": "unknown"
+    }
+  ]
+}
