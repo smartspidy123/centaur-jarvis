@@ -41,6 +41,20 @@ except ImportError as _import_err:
         _import_err,
     )
 
+# ---------------------------------------------------------------------------
+# Attempt to import OAST Listener; if unavailable, we set a flag for graceful fallback
+# ---------------------------------------------------------------------------
+_OAST_AVAILABLE = True
+try:
+    from modules.oast_listener import generate_payload as oast_generate_payload
+except ImportError as _import_err:
+    _OAST_AVAILABLE = False
+    logger.info(
+        "OAST Listener import failed — OAST payload generation will be skipped. "
+        "Error: %s",
+        _import_err,
+    )
+
 # Sentinel for "no AI available" so we can catch it uniformly
 class NoAIAvailableError(Exception):
     """Raised when no AI backend is reachable after exhausting the fallback chain."""
@@ -222,6 +236,21 @@ class PayloadGenerator:
             self._gen_retries,
             original_payload[:80],
         )
+        
+        # Optionally generate OAST payload as fallback for blind vulnerabilities
+        if vuln_type in ["blind_xss", "blind_ssrf", "blind_sqli", "blind_rce"]:
+            logger.info(
+                "Mutation failed for blind vulnerability '%s' — attempting OAST payload generation",
+                vuln_type
+            )
+            # We need task_id and scan_id; they're not available here.
+            # For now, generate a generic OAST payload without task/scan context
+            # In practice, the caller should provide these via additional parameters
+            # or we should fetch from context.
+            # For now, we'll log that OAST is available but skip.
+            if _OAST_AVAILABLE:
+                logger.debug("OAST module available but missing task_id/scan_id — skipping")
+        
         return None
 
     # ------------------------------------------------------------------
@@ -525,6 +554,54 @@ Respond with ONLY a JSON object:
             return {"is_vulnerable": True, "confidence": 0.6, "evidence": "Heuristic parse — AI indicated vulnerable."}
 
         return default
+
+    # ------------------------------------------------------------------
+    # OAST PAYLOAD GENERATION
+    # ------------------------------------------------------------------
+    def generate_oast_payload(self, vuln_type: str, task_id: str, scan_id: str) -> Optional[str]:
+        """
+        Generate an OAST payload for blind vulnerability detection.
+        
+        Args:
+            vuln_type: Vulnerability type (e.g., "blind_xss", "blind_ssrf")
+            task_id: Parent task ID
+            scan_id: Scan session ID
+            
+        Returns:
+            OAST payload URL string, or None if OAST module unavailable
+        """
+        if not _OAST_AVAILABLE:
+            logger.debug("OAST module not available — skipping OAST payload generation")
+            return None
+        
+        try:
+            # Import here to avoid circular imports
+            from modules.oast_listener import generate_payload as oast_generate_payload
+            
+            payload_info = oast_generate_payload(
+                task_id=task_id,
+                scan_id=scan_id,
+                vuln_type=vuln_type,
+                config=None,  # Uses module config
+                redis_client=None,  # Uses module singleton
+            )
+            logger.info(
+                "Generated OAST payload",
+                extra={
+                    "vuln_type": vuln_type,
+                    "task_id": task_id,
+                    "scan_id": scan_id,
+                    "url": payload_info.url,
+                }
+            )
+            return payload_info.url
+        except Exception as e:
+            logger.warning(
+                "Failed to generate OAST payload: %s",
+                e,
+                exc_info=True
+            )
+            return None
 
     # ------------------------------------------------------------------
     # STATIC FALLBACKS & DEDUP

@@ -42,6 +42,73 @@ except ImportError:
     HAS_TENACITY = False
 
 
+def extract_domain(url):
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    return parsed.hostname or url.replace("https://", "").replace("http://", "").split("/")[0]
+
+
+def _format_recon_command(tool: str, target: str, params: dict) -> str:
+    """Generate a correct command string for logging based on tool."""
+    # Mapping of param keys to command-line flags
+    flag_map = {
+        "subfinder": {
+            "recursive": "-recursive",
+            "threads": "-t",
+            "timeout": "-timeout",
+            "sources": "-sources",
+            "resolvers": "-rL",
+            "exclude_sources": "-es",
+        },
+        "httpx": {
+            "ports": "-ports",
+            "status_code": "-sc",
+            "tech_detect": "-td",
+            "follow_redirects": "-follow-redirects",
+            "threads": "-threads",
+            "rate_limit": "-rl",
+            "match_codes": "-mc",
+            "filter_codes": "-fc",
+            "path": "-path",
+        },
+        "naabu": {
+            "ports": "-p",
+            "top_ports": "-top-ports 1000",
+            "rate": "-rate",
+            "timeout": "-timeout",
+            "retries": "-retries",
+            "interface": "-interface",
+            "nmap_cli": "-nmap-cli",
+            "exclude_ports": "-exclude-ports",
+        },
+    }
+    # Determine base command
+    if tool == "subfinder":
+        cmd = f"subfinder -d {target}"
+    elif tool == "httpx":
+        cmd = f"httpx -u {target}"
+    elif tool == "naabu":
+        cmd = f"naabu -host {target}"
+    else:
+        cmd = f"{tool} {target}"
+    
+    # Add parameters
+    for key, value in params.items():
+        mapping = flag_map.get(tool, {})
+        flag = mapping.get(key)
+        if flag is None:
+            flag = f"--{key}"
+        if tool == "naabu" and key == "ports" and value == "top-1000":
+            # Special handling: use -top-ports instead of -p
+            cmd += f" -top-ports 1000"
+        else:
+            if isinstance(value, bool):
+                if value:
+                    cmd += f" {flag}"
+            else:
+                cmd += f" {flag} {value}"
+    return cmd
+
 # Status constants (UPPERCASE per architecture rule)
 STATUS_PENDING = "PENDING"
 STATUS_RUNNING = "RUNNING"
@@ -103,6 +170,7 @@ class ScanController:
     QUEUE_RECON = "jarvis:queue:recon"
     QUEUE_FUZZER = "jarvis:queue:fuzzer"
     QUEUE_SNIPER = "jarvis:queue:sniper"
+    QUEUE_PLAYWRIGHT = "jarvis:queue:playwright"
     QUEUE_RESULTS = "jarvis:results"
     SCAN_STATE_KEY = "jarvis:scan:{scan_id}:state"
 
@@ -172,6 +240,10 @@ class ScanController:
             "critical_findings": 0,
             "technologies": [],
         }
+
+        # SPA detection tracking
+        self._spa_lock = threading.Lock()
+        self._spa_candidates: Dict[str, Dict[str, Any]] = {}  # target -> {technologies, url, etc}
 
         # Task tracking
         self._tasks_lock = threading.Lock()
@@ -460,9 +532,7 @@ class ScanController:
 
                 # Extract hostname for tools that need domain (subfinder, naabu)
                 if tool in ("subfinder", "naabu"):
-                    from urllib.parse import urlparse
-                    parsed = urlparse(target)
-                    actual_target = parsed.hostname or target
+                    actual_target = extract_domain(target)
                 else:
                     actual_target = target
 
@@ -482,14 +552,7 @@ class ScanController:
                     display_target = actual_target
                 else:
                     display_target = target
-                cmd_str = f"{tool} {display_target}"
-                if params:
-                    for k, v in params.items():
-                        if isinstance(v, bool):
-                            if v:
-                                cmd_str += f" --{k}"
-                        else:
-                            cmd_str += f" --{k} {v}"
+                cmd_str = _format_recon_command(tool, display_target, params)
                 self._add_event("cmd", cmd_str)
 
                 if self._push_task(self.QUEUE_RECON, task_payload):
@@ -709,6 +772,16 @@ class ScanController:
         # Update tool summaries
         self._update_summaries(tool, data)
 
+        # Detect SPAs and push playwright tasks
+        if status == STATUS_COMPLETED:
+            # Extract target from result
+            target = result.get("target", "")
+            if not target:
+                # Try to get target from task data
+                target = data.get("url", data.get("target", ""))
+            if target:
+                self._detect_spa_and_push_tasks(tool, data, target)
+
         # Log completion event
         if status == STATUS_COMPLETED:
             summary = data.get("summary", f"{tool} completed")
@@ -768,6 +841,79 @@ class ScanController:
                 if f.get("severity", "").upper() in ("CRITICAL", "HIGH")
             )
             self.tool_summaries["critical_findings"] += critical_count
+
+    def _detect_spa_and_push_tasks(self, tool: str, data: Dict[str, Any], target: str):
+        """Detect Single Page Applications from httpx tech_detect results and push playwright tasks."""
+        if tool != "httpx":
+            return
+        
+        techs = data.get("technologies", [])
+        if not techs:
+            return
+        
+        # Get playwright config
+        playwright_config = self.config.get("playwright", {})
+        spa_frameworks = playwright_config.get("spa_frameworks", ["react", "vue", "angular", "next.js", "nuxt", "svelte", "ember"])
+        max_targets = playwright_config.get("max_targets", 5)
+        
+        # Check if any SPA framework detected
+        detected_frameworks = []
+        for tech in techs:
+            tech_lower = tech.lower()
+            for framework in spa_frameworks:
+                if framework.lower() in tech_lower:
+                    detected_frameworks.append(framework)
+                    break
+        
+        if not detected_frameworks:
+            return
+        
+        # Store SPA candidate
+        with self._spa_lock:
+            # Limit number of SPA targets
+            if len(self._spa_candidates) >= max_targets:
+                self._add_event("info", f"SPA detection limit reached ({max_targets}), skipping {target}")
+                return
+            
+            self._spa_candidates[target] = {
+                "technologies": detected_frameworks,
+                "url": target,
+                "detected_at": datetime.now(timezone.utc).isoformat(),
+            }
+            
+        self._add_event("info", f"SPA detected: {target} ({', '.join(detected_frameworks)})")
+        
+        # Push playwright task
+        self._push_playwright_task(target)
+
+    def _push_playwright_task(self, target: str):
+        """Push a playwright rendering task to the playwright queue."""
+        playwright_config = self.config.get("playwright", {})
+        
+        task_id = f"{self.scan_id}_playwright_{uuid.uuid4().hex[:6]}"
+        
+        task_payload = {
+            "task_id": task_id,
+            "scan_id": self.scan_id,
+            "phase": "playwright",
+            "type": "PLAYWRIGHT_RENDER",
+            "target": target,
+            "params": {
+                "extract_forms": playwright_config.get("extract_forms", True),
+                "max_depth": playwright_config.get("max_depth", 1),
+                "timeout": 30,
+            },
+            "status": STATUS_PENDING,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        
+        if self._push_task(self.QUEUE_PLAYWRIGHT, task_payload):
+            self._add_activity(task_id, "playwright", f"rendering {target}")
+            with self._stats_lock:
+                self.stats["tasks_pushed"] += 1
+            self._add_event("cmd", f"playwright render {target}")
+        else:
+            self._add_error(f"Failed to push playwright task for {target}")
 
     def _wait_for_phase_completion(self, phase: str, timeout: int = 600):
         """Wait until all tasks for current phase are completed."""

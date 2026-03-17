@@ -8,7 +8,7 @@ server:
   http:
     enabled: true
     host: "0.0.0.0"
-    port: 8080
+    port: 80
     tls_enabled: false
     tls_cert: ""
     tls_key: ""
@@ -20,14 +20,14 @@ server:
     workers: 4
 
   dns:
-    enabled: false
-    host: "0.0.0.0"
-    port: 5353          # Use 5353 for non-root; 53 requires root/cap_net_bind
-    domain: "oast.example.com"    # Base domain for DNS callbacks
+    enabled: true
+   #host: "0.0.0.0"
+    port: 53          # Use 5353 for non-root; 53 requires root/cap_net_bind
+    domain: "oast.pro"  # Base domain for DNS callbacks
     # TTL for DNS responses
-    response_ttl: 60
+ #  response_ttl: 60
     # IP to resolve callback domains to
-    resolve_ip: "127.0.0.1"
+  # resolve_ip: "127.0.0.1"
 
 redis:
   host: "localhost"

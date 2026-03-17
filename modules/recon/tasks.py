@@ -292,6 +292,26 @@ def httpx_task(
         if params.get("filter_codes"):
             cmd.extend(["-fc", str(params["filter_codes"])])
 
+        # Headers
+        headers = params.get("headers")
+        if isinstance(headers, dict):
+            for header_name, header_value in headers.items():
+                # Basic validation to prevent command injection
+                if isinstance(header_name, str) and isinstance(header_value, str):
+                    # Remove newlines and colons? Actually header format is "Name: Value"
+                    # Httpx expects -H "Name: Value"
+                    header_str = f"{header_name}: {header_value}"
+                    # Ensure no dangerous characters that could break shell (but we use shell=False)
+                    # Still sanitize newlines and carriage returns
+                    if "\n" not in header_str and "\r" not in header_str:
+                        cmd.extend(["-H", header_str])
+        # Cookies
+        cookies = params.get("cookies")
+        if isinstance(cookies, list):
+            for cookie in cookies:
+                if isinstance(cookie, str) and "\n" not in cookie and "\r" not in cookie:
+                    cmd.extend(["-cookie", cookie])
+
         # --- Execute ---
         try:
             stdout, stderr, rc = _run_subprocess(cmd, timeout)
@@ -363,6 +383,21 @@ def nuclei_task(
         cmd.append("-nt")
     if params.get("automatic_scan"):
         cmd.append("-as")
+
+    # Headers
+    headers = params.get("headers")
+    if isinstance(headers, dict):
+        for header_name, header_value in headers.items():
+            if isinstance(header_name, str) and isinstance(header_value, str):
+                header_str = f"{header_name}: {header_value}"
+                if "\n" not in header_str and "\r" not in header_str:
+                    cmd.extend(["-H", header_str])
+    # Cookies (nuclei supports -cookie)
+    cookies = params.get("cookies")
+    if isinstance(cookies, list):
+        for cookie in cookies:
+            if isinstance(cookie, str) and "\n" not in cookie and "\r" not in cookie:
+                cmd.extend(["-cookie", cookie])
 
     try:
         stdout, stderr, rc = _run_subprocess(cmd, timeout)

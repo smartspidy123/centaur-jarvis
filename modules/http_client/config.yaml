@@ -1,0 +1,96 @@
+# Centaur-Jarvis HTTP Client Configuration
+# ==========================================
+
+http_client:
+  # Default timeout for all requests (seconds)
+  default_timeout: 30
+  # Maximum retries for transient errors
+  max_retries: 3
+  # Base delay for exponential backoff (seconds)
+  retry_base_delay: 1.0
+  # Maximum backoff delay (seconds)
+  retry_max_delay: 60.0
+  # Whether to verify SSL certificates (disable for pentesting targets only)
+  verify_ssl: false
+  # Prefer HTTP/2 when available
+  prefer_http2: true
+  # Prefer curl_cffi for TLS impersonation
+  prefer_curl_cffi: true
+
+proxy:
+  # Proxy list (format: protocol://[user:pass@]host:port)
+  proxies:
+    # - "http://proxy1.example.com:8080"
+    # - "https://proxy2.example.com:8443"
+    # - "socks5h://user:pass@proxy3.example.com:1080"
+    []
+  # Cooldown before resurrecting a dead proxy (seconds)
+  dead_proxy_cooldown: 60
+  # Maximum consecutive failures before marking proxy DEAD
+  max_failures: 3
+  # Health check interval (seconds)
+  health_check_interval: 120
+  # Health check URL
+  health_check_url: "https://httpbin.org/ip"
+  # Fallback to direct connection if all proxies are dead
+  fallback_direct: true
+  # Redis key prefix for proxy states
+  redis_key_prefix: "centaur:proxy"
+
+rate_limiter:
+  # Default rate limit (requests per second) per domain
+  default_rate: 10.0
+  # Default bucket capacity (burst size)
+  default_capacity: 20
+  # Per-domain overrides
+  domain_rates:
+    # example.com:
+    #   rate: 5.0
+    #   capacity: 10
+    {}
+  # Redis key prefix
+  redis_key_prefix: "centaur:ratelimit"
+  # Key TTL in Redis (seconds) — auto-expire stale domains
+  key_ttl: 3600
+
+circuit_breaker:
+  # Consecutive failures to open circuit
+  failure_threshold: 10
+  # Time in OPEN state before transitioning to HALF_OPEN (seconds)
+  recovery_timeout: 30
+  # Number of test requests in HALF_OPEN state
+  half_open_max_calls: 2
+  # Redis key prefix
+  redis_key_prefix: "centaur:circuit"
+
+tls:
+  # Browser impersonation profiles (curl_cffi supported values)
+  impersonation_profiles:
+    - "chrome110"
+    - "chrome107"
+    - "chrome104"
+    - "chrome101"
+    - "chrome100"
+    - "chrome99"
+    - "safari15_5"
+    - "safari15_3"
+    - "edge101"
+    - "edge99"
+  # Rotate fingerprint per request (true) or per session (false)
+  rotate_per_request: true
+
+user_agent:
+  # Rotate user-agent per request
+  rotate_per_request: true
+
+redis:
+  host: "127.0.0.1"
+  port: 6379
+  db: 0
+  password: null
+  socket_timeout: 5
+  retry_on_timeout: true
+
+logging:
+  level: "INFO"
+  format: "json"

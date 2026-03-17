@@ -59,6 +59,41 @@ from shared.schemas import (  # noqa: E402
 from modules.recon.parsers import get_parser  # noqa: E402
 from modules.recon.tasks import TASK_DISPATCH, TaskExecResult  # noqa: E402
 
+# Token harvester import (optional)
+try:
+    from modules.token_harvester import get_tokens_for_domain
+    TOKEN_HARVESTER_AVAILABLE = True
+except ImportError:
+    get_tokens_for_domain = None
+    TOKEN_HARVESTER_AVAILABLE = False
+
+
+def _extract_domain(target: str) -> str:
+    """
+    Extract domain from a target (URL or domain).
+    Examples:
+        https://example.com/path -> example.com
+        http://sub.example.com:8080 -> sub.example.com
+        example.com -> example.com
+        sub.example.com -> sub.example.com
+    """
+    import re
+    from urllib.parse import urlparse
+    
+    # If it looks like a URL with scheme
+    if "://" in target:
+        parsed = urlparse(target)
+        hostname = parsed.hostname
+        if hostname:
+            return hostname
+    # Remove any port number
+    if ":" in target and not target.startswith("http"):
+        target = target.split(":")[0]
+    # Remove any path after /
+    if "/" in target:
+        target = target.split("/")[0]
+    return target
+
 
 # ---------------------------------------------------------------------------
 # Configuration Loader
@@ -359,6 +394,87 @@ class ReconWorker:
                 f"Failed to update task status for {task_id}: {exc}"
             )
 
+    # -- Token Injection ----------------------------------------------------
+
+    def _inject_tokens(self, target: str, merged_params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Fetch tokens for the target domain and inject them into merged_params.
+        Returns updated merged_params with headers/cookies added.
+        """
+        if not TOKEN_HARVESTER_AVAILABLE or get_tokens_for_domain is None:
+            return merged_params
+
+        try:
+            domain = _extract_domain(target)
+            tokens = get_tokens_for_domain(domain)
+            if not tokens:
+                return merged_params
+
+            # Group tokens by type
+            headers_to_add = []
+            cookies_to_add = []
+
+            for token in tokens:
+                token_type = token.get("type", "")
+                token_value = token.get("value", "")
+                raw_name = token.get("raw_name", "")
+
+                if token_type in ("jwt", "bearer", "basic", "oauth", "api_key", "custom"):
+                    # Inject as Authorization header or custom header
+                    if token_type == "bearer":
+                        header_value = f"Bearer {token_value}"
+                        headers_to_add.append(("Authorization", header_value))
+                    elif token_type == "jwt":
+                        header_value = f"Bearer {token_value}"
+                        headers_to_add.append(("Authorization", header_value))
+                    elif token_type == "basic":
+                        header_value = f"Basic {token_value}"
+                        headers_to_add.append(("Authorization", header_value))
+                    elif token_type == "api_key":
+                        # API key typically goes in a custom header
+                        headers_to_add.append((raw_name or "X-API-Key", token_value))
+                    else:
+                        # generic custom header
+                        headers_to_add.append((raw_name or "X-Token", token_value))
+                elif token_type == "cookie":
+                    cookies_to_add.append(f"{raw_name}={token_value}")
+                elif token_type == "csrf":
+                    headers_to_add.append((raw_name or "X-CSRF-Token", token_value))
+
+            # Update merged_params with headers and cookies
+            if headers_to_add:
+                # Convert list of tuples to dict, but httpx expects headers as list of strings "Header: value"
+                # We'll store as a dict and let the task function handle formatting
+                if "headers" not in merged_params:
+                    merged_params["headers"] = {}
+                for header_name, header_value in headers_to_add:
+                    merged_params["headers"][header_name] = header_value
+                self.logger.info(
+                    f"Injected {len(headers_to_add)} headers for domain {domain}"
+                )
+
+            if cookies_to_add:
+                if "cookies" not in merged_params:
+                    merged_params["cookies"] = []
+                merged_params["cookies"].extend(cookies_to_add)
+                self.logger.info(
+                    f"Injected {len(cookies_to_add)} cookies for domain {domain}"
+                )
+
+            if headers_to_add or cookies_to_add:
+                self.logger.debug(
+                    f"Token injection summary for {domain}: "
+                    f"headers={len(headers_to_add)}, cookies={len(cookies_to_add)}"
+                )
+
+        except Exception as exc:
+            self.logger.warning(
+                f"Token injection failed for target {target}: {exc}"
+            )
+            # Graceful degradation: continue without tokens
+
+        return merged_params
+
     # -- Task Execution Pipeline --------------------------------------------
 
     def _execute_task(self, task: Task) -> TaskResult:
@@ -390,7 +506,10 @@ class ReconWorker:
         # 3. Merge params: defaults ← task-specific
         merged_params = {**default_params, **task.params}
 
-        # 4. Execute tool
+        # 4. Token injection (if token harvester available)
+        merged_params = self._inject_tokens(task.target, merged_params)
+
+        # 5. Execute tool
         self.logger.info(
             f"Executing {task.type.value} on target={task.target} "
             f"(task_id={task.task_id})"

@@ -15,10 +15,25 @@ Edge Cases Handled:
 import json
 import re
 import time
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any, List
 
 import redis
 import yaml as pyyaml
+
+# OAST Listener integration with graceful fallback
+try:
+    from modules.oast_listener.correlator import generate_payload, get_oast_url
+    from modules.oast_listener.models import PayloadInfo
+    OAST_AVAILABLE = True
+except ImportError:
+    OAST_AVAILABLE = False
+    generate_payload = None
+    get_oast_url = None
+    PayloadInfo = None
+    logger.warning(
+        "OAST Listener module not available; blind vulnerability detection "
+        "will not include OAST payloads."
+    )
 
 try:
     from tenacity import (
@@ -62,6 +77,21 @@ except ImportError:
 
 logger = get_logger("nuclei_sniper.generator")
 
+# OAST Listener integration with graceful fallback
+try:
+    from modules.oast_listener.correlator import generate_payload, get_oast_url
+    from modules.oast_listener.models import PayloadInfo
+    OAST_AVAILABLE = True
+except ImportError:
+    OAST_AVAILABLE = False
+    generate_payload = None
+    get_oast_url = None
+    PayloadInfo = None
+    logger.warning(
+        "OAST Listener module not available; blind vulnerability detection "
+        "will not include OAST payloads."
+    )
+
 
 # ---------------------------------------------------------------------------
 # Configuration loader
@@ -77,6 +107,41 @@ def _load_config(config_path: str = None) -> dict:
     except (FileNotFoundError, pyyaml.YAMLError) as exc:
         logger.warning("Config load error: %s; using defaults", exc)
         return {}
+
+
+# ---------------------------------------------------------------------------
+# Blind vulnerability detection
+# ---------------------------------------------------------------------------
+def _is_blind_vulnerability(description: str) -> Tuple[bool, str]:
+    """
+    Detect if a CVE description indicates a blind vulnerability.
+    
+    Returns:
+        Tuple of (is_blind, vuln_type)
+        vuln_type can be 'blind_xss', 'blind_ssrf', 'blind_sqli', 'blind_rce', or 'blind'
+    """
+    desc_lower = description.lower()
+    
+    # Keywords for blind vulnerabilities
+    blind_keywords = [
+        "blind", "out-of-band", "oast", "out of band", "time-based",
+        "delayed", "asynchronous", "callback", "external", "dns",
+        "http callback", "second-order"
+    ]
+    
+    # Specific vulnerability type detection
+    if any(kw in desc_lower for kw in ["xss", "cross-site scripting"]):
+        return True, "blind_xss"
+    elif any(kw in desc_lower for kw in ["ssrf", "server-side request forgery"]):
+        return True, "blind_ssrf"
+    elif any(kw in desc_lower for kw in ["sql injection", "sqli", "sql"]):
+        return True, "blind_sqli"
+    elif any(kw in desc_lower for kw in ["rce", "remote code execution", "command injection"]):
+        return True, "blind_rce"
+    elif any(kw in desc_lower for kw in blind_keywords):
+        return True, "blind"
+    
+    return False, ""
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +216,7 @@ RULES:
     @staticmethod
     def build_generation_prompt(cve_id: str, description: str,
                                  poc_links: list = None,
+                                 oast_payload_url: Optional[str] = None,
                                  max_length: int = 4000) -> str:
         """Build the initial generation prompt."""
         prompt_parts = [
@@ -161,6 +227,15 @@ RULES:
         if poc_links:
             links_text = "\n".join(f"  - {link}" for link in poc_links[:5])
             prompt_parts.append(f"\nPoC/Reference Links:\n{links_text}")
+
+        # Include OAST payload URL for blind vulnerabilities
+        if oast_payload_url:
+            prompt_parts.append(
+                f"\nIMPORTANT: This is a BLIND vulnerability. "
+                f"Include an OAST (Out-of-Band) payload in the template. "
+                f"Use this callback URL: {oast_payload_url}"
+                f"\nThe template should trigger a callback to this URL when the vulnerability is exploited."
+            )
 
         prompt_parts.append(
             "\nRemember: Output ONLY the raw YAML template. "
@@ -461,7 +536,9 @@ class TemplateGenerator:
 
     def generate_template(self, cve_id: str, description: str,
                            poc_links: list = None,
-                           validation_error: str = None) -> Tuple[str, bool]:
+                           validation_error: str = None,
+                           task_id: str = None,
+                           scan_id: str = None) -> Tuple[str, bool]:
         """
         Generate a Nuclei template for a CVE.
 
@@ -470,11 +547,39 @@ class TemplateGenerator:
             description: CVE description
             poc_links: List of PoC URLs
             validation_error: If provided, this is a retry with error feedback
+            task_id: Optional task ID for OAST payload generation
+            scan_id: Optional scan ID for OAST payload generation
 
         Returns:
             Tuple of (yaml_string, is_ai_generated)
             is_ai_generated is False when fallback template is used.
         """
+        oast_payload_url = None
+        
+        # Detect blind vulnerabilities and generate OAST payloads
+        if not validation_error and OAST_AVAILABLE and task_id and scan_id:
+            is_blind, vuln_type = _is_blind_vulnerability(description)
+            if is_blind:
+                try:
+                    payload = generate_payload(
+                        task_id=task_id,
+                        scan_id=scan_id,
+                        vuln_type=vuln_type,
+                        config=self._config,
+                        redis_client=self._redis_client,
+                    )
+                    oast_payload_url = payload.url
+                    logger.info(
+                        "Generated OAST payload for blind %s vulnerability: %s",
+                        vuln_type, oast_payload_url
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to generate OAST payload for %s: %s",
+                        cve_id, exc
+                    )
+                    # Continue without OAST payload
+        
         if validation_error:
             # Correction prompt (EC5)
             prompt = PromptBuilder.build_correction_prompt(
@@ -492,6 +597,7 @@ class TemplateGenerator:
                 cve_id=cve_id,
                 description=description,
                 poc_links=poc_links,
+                oast_payload_url=oast_payload_url,
                 max_length=self._max_prompt_length,
             )
             logger.info("Generating initial template for %s", cve_id)

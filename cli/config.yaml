@@ -105,6 +105,54 @@ services:
     command: "python -m modules.nuclei_sniper.executor"
     heartbeat_key: "worker:heartbeat:sniper"
     queue: "queue:nuclei_sniper:execute"
+  token_harvester:
+    command: "mitmdump -s modules/token_harvester/mitm_addon.py --listen-port 8080"
+    heartbeat_key: "worker:heartbeat:token_harvester"
+    queue: null
+  playwright_renderer:
+    command: "python -m modules.playwright_rend.renderer"
+    heartbeat_key: "worker:heartbeat:playwright_renderer"
+    queue: "queue:playwright"
+  oast_server:
+    command: "python -m modules.oast_listener.server"
+    heartbeat_key: "worker:heartbeat:oast_server"
+    queue: null  # server doesn't consume tasks
+  oast_correlator:
+      command: "python -m modules.oast_listener.correlator"
+      heartbeat_key: "worker:heartbeat:oast_correlator"
+      queue: null  # correlator consumes from Redis internally
+  
+    dirbust_worker:
+      command: "python -m modules.dirbust.worker"
+      heartbeat_key: "worker:heartbeat:dirbust_worker"
+      queue: "queue:dirbust"
+  
+  # --- Playwright Configuration ---
+  playwright:
+    max_targets: 5
+    extract_forms: true
+    max_depth: 1
+    spa_frameworks: ["react", "vue", "angular", "next.js", "nuxt", "svelte", "ember"]
+
+# --- OAST Configuration ---
+oast:
+  domain: "oast.pro"  # base domain for fallback
+  http_port: 80
+  dns_enabled: false
+  dns_port: 53
+  payload_ttl: 86400  # 24 hours
+  max_callbacks_per_second: 100
+
+# --- Directory Bruteforcer Configuration ---
+dirbust:
+  enabled: true
+  wordlist: "/usr/share/wordlists/dirb/common.txt"
+  extensions: ["php", "asp", "aspx", "jsp", "txt", "bak", "old", "inc"]
+  threads: 40
+  delay: 0.1
+  recursive: false
+  depth: 1
+  max_targets: 20
 
 # --- State Management ---
 state:
@@ -125,3 +173,4 @@ logging:
   file: "logs/cli.log"
   max_size_mb: 50
   backup_count: 5
+
