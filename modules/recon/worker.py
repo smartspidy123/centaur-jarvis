@@ -164,7 +164,7 @@ class ReconWorker:
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
         self.worker_id: str = config["worker_id"]
-        self.queue_in: str = config.get("queue", {}).get("inbound", "queue:recon")
+        self.queue_in: str = config.get("queue", {}).get("inbound", "jarvis:queue:recon")
         self.queue_out: str = config.get("queue", {}).get("results", "results:incoming")
         self.blpop_timeout: int = int(config.get("queue", {}).get("blpop_timeout", 5))
         self.heartbeat_interval: int = int(config.get("heartbeat_interval", 30))

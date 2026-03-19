@@ -1,0 +1,86 @@
+# Centaur-Jarvis Modules Configuration
+# Enable/disable modules and configure their settings
+
+# Core Modules
+core:
+  enabled: true
+  orchestrator:
+    task_timeout: 300
+    max_retries: 3
+    shutdown_timeout: 30
+
+# Security Testing Modules
+nuclei_sniper:
+  enabled: true
+  templates_path: ./data/nuclei-templates
+  concurrent_scans: 10
+
+smart_fuzzer:
+  enabled: true
+  max_payloads: 1000
+  concurrent_requests: 5
+
+idor_analyzer:
+  enabled: true
+  session_timeout: 3600
+
+dirbust:
+  enabled: true
+  wordlists:
+    - ./data/wordlists/common.txt
+    - ./data/wordlists/directory-list-2.3-medium.txt
+
+# AI Modules
+ai_routing:
+  enabled: true
+  providers:
+    deepseek:
+      enabled: true
+      api_key: ${DEEPSEEK_API_KEY}
+    gemini:
+      enabled: false
+      api_key: ${GEMINI_API_KEY}
+    groq:
+      enabled: false
+      api_key: ${GROQ_API_KEY}
+    local_llm:
+      enabled: false
+      endpoint: http://localhost:8080
+
+rag:
+  enabled: true
+  vector_store: zilliz
+  knowledge_base_path: ./data/knowledge_base
+
+# Infrastructure Modules
+http_client:
+  enabled: true
+  timeout: 30
+  retries: 3
+
+oast_listener:
+  enabled: true
+  port: 8081
+
+playwright_rend:
+  enabled: true
+  headless: true
+
+token_harvester:
+  enabled: true
+  port: 8082
+
+reporting:
+  enabled: true
+  templates_path: ./modules/reporting/templates
+
+# Module Dependencies
+dependencies:
+  nuclei_sniper:
+    requires: [http_client]
+  smart_fuzzer:
+    requires: [http_client, ai_routing]
+  idor_analyzer:
+    requires: [http_client]
+  dirbust:
+    requires: [http_client]

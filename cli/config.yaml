@@ -118,14 +118,14 @@ services:
     heartbeat_key: "worker:heartbeat:oast_server"
     queue: null  # server doesn't consume tasks
   oast_correlator:
-      command: "python -m modules.oast_listener.correlator"
-      heartbeat_key: "worker:heartbeat:oast_correlator"
-      queue: null  # correlator consumes from Redis internally
+    command: "python -m modules.oast_listener.correlator"
+    heartbeat_key: "worker:heartbeat:oast_correlator"
+    queue: null  # correlator consumes from Redis internally
   
-    dirbust_worker:
-      command: "python -m modules.dirbust.worker"
-      heartbeat_key: "worker:heartbeat:dirbust_worker"
-      queue: "queue:dirbust"
+  dirbust_worker:
+    command: "python -m modules.dirbust.worker"
+    heartbeat_key: "worker:heartbeat:dirbust_worker"
+    queue: "queue:dirbust"
   
   # --- Playwright Configuration ---
   playwright:

@@ -5,3 +5,9 @@ dump.rdb
 .env
 config/secrets.yaml
 =2.4.0
+*.db
+*.rdb
+node_modules/
+__pycache__/
+.env
+dist/
